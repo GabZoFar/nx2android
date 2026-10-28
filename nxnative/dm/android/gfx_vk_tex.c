@@ -71,9 +71,14 @@ const vkfmt_t *vk_fmt(int f) {
                 VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_X8_D24_UNORM_PACK32, &fp);
                 if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) o->vk = VK_FORMAT_D32_SFLOAT;
             }
+            // DEPTH24_STENCIL8: D32_SFLOAT_S8 where the device renders to no D24S8 (Apple GPUs: in the Android emulator on an M3 Max, MoltenVK gives D24S8 no format
+            // features at all, probes/vkprobe.c). Metal makes the same substitute (nvn_fmt_mtl.c: a precision upgrade as a render target)
+            VkFormatProperties d24; vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_D24_UNORM_S8_UINT, &d24);
+            VkFormat ds = d24.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
+            if (f == 0x35) o->vk = ds;
             if (f == 0x31) {   // STENCIL8 alone: a combined format where the device has no S8 attachments
                 VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_S8_UINT, &fp);
-                if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) o->vk = VK_FORMAT_D24_UNORM_S8_UINT;
+                if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) o->vk = ds;
             }
             o->depth = f >= 0x32 && f <= 0x36; o->stencil = f == 0x31 || f == 0x35 || f == 0x36 || (f == 0x31);
             o->compressed = o->bw > 1 || o->bh > 1;
@@ -137,6 +142,13 @@ static vkimg_t *img_new(const tex_t *t, const vkfmt_t *f) {
         d->target == 2 ? VK_IMAGE_TYPE_3D : d->target == 0 || d->target == 3 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D, f->vk,
         {im->w, im->h, im->d}, im->levels, im->layers, (VkSampleCountFlagBits)im->samples, VK_IMAGE_TILING_OPTIMAL, u, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     if (im->samples > 1) ci.flags &= ~(VkImageCreateFlags)VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+    // BLOCK_TEXEL_VIEW_COMPATIBLE only where the device takes it for the format: the Android emulator's MoltenVK refuses it for every BC format (FORMAT_NOT_SUPPORTED, and
+    // vkCreateImage FEATURE_NOT_PRESENT), so every BC texture of Link's Awakening's menus failed. No view needs it: a view changing the block size keeps the image's format (vk_tex_view)
+    if (f->compressed && (unsigned)f->vk < 256) {
+        static _Atomic signed char btv[256];   // per format: 0 unknown, 1 taken, -1 refused
+        if (!btv[f->vk]) { VkImageFormatProperties ip; btv[f->vk] = vkGetPhysicalDeviceImageFormatProperties(V.pd, f->vk, ci.imageType, ci.tiling, u, ci.flags, &ip) ? -1 : 1; }
+        if (btv[f->vk] < 0) ci.flags &= ~(VkImageCreateFlags)VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
+    }
     VkFormat fl[2] = {f->vk, srgb_twin(f->vk)}; VkImageFormatListCreateInfo fli = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, NULL, fl[1] ? 2u : 1u, fl};
     if (ubwc_mode() && !f->compressed && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
         im->fixed_fmt = 1; ci.pNext = &fli;

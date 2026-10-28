@@ -194,12 +194,52 @@ static int pool_zero_copy(vkpool_t *p, uint8_t *mem, uint64_t size) {
     p->ahb = ahb; p->zero_copy = 1;
     return 0;
 }
+// Zero copy through the driver's own memory, where the allocator makes no AHardwareBuffer for GPU data (the Android emulator: its ranchu gralloc refuses every BLOB
+// with GPU usage, so every pool was copied in full around every submission): host-visible coherent memory is mapped with vkMapMemory, and the device file behind that
+// mapping (its /proc/self/maps line: the emulator's /dev/goldfish_address_space, at an offset) is mapped again, MAP_SHARED | MAP_FIXED, over [mem, mem+size) after the
+// pool's contents are copied in. The guest pointer is then GPU memory: CPU writes reach the GPU and back with no flush (probes/vkzc.c "remap" moved the same pages:
+// 0 wrong words in 2 x 64 MB, read and write as fast as anonymous memory). Moving the driver's mapping onto the pool (mremap) worked too, but left its old range free
+// until a placeholder covered it, and another thread's mapping landed there in between: the placeholder wiped it and malloc crashed at start-up. The second mapping
+// leaves the driver's where it is. DM_VK_NO_ZC_MAP=1 turns it off. 0 on success
+static int dev_mapping(const void *at, int *fd, uint64_t *off) {   // the device file and offset behind a mapped address: an open fd on that file
+    FILE *f = fopen("/proc/self/maps", "r"); if (!f) return -1;
+    char ln[512], path[256] = ""; unsigned long lo, hi, fo; int found = 0;
+    while (fgets(ln, sizeof ln, f)) {
+        int pos = 0; if (sscanf(ln, "%lx-%lx %*s %lx %*s %*s %n", &lo, &hi, &fo, &pos) < 3 || (uintptr_t)at < lo || (uintptr_t)at >= hi) continue;
+        if (pos > 0) { snprintf(path, sizeof path, "%s", ln + pos); path[strcspn(path, "\n")] = 0; }
+        *off = fo + ((uintptr_t)at - lo); found = path[0] == '/'; break; }
+    fclose(f); if (!found) return -1;
+    char lp[64], tg[256];
+    for (int i = 0; i < 1024; i++) { snprintf(lp, sizeof lp, "/proc/self/fd/%d", i); ssize_t k = readlink(lp, tg, sizeof tg - 1);
+        if (k > 0) { tg[k] = 0; if (!strcmp(tg, path)) { *fd = i; return 0; } } }
+    return -1;
+}
+static int pool_zero_copy_map(vkpool_t *p, uint8_t *mem, uint64_t size) {
+    static int off = -1; if (off < 0) off = getenv("DM_VK_NO_ZC_MAP") != NULL;
+    if (off) return -5;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, size, POOL_USAGE, VK_SHARING_MODE_EXCLUSIVE};
+    VkBuffer b; if (vkCreateBuffer(V.dev, &bi, NULL, &b)) return -5;
+    VkMemoryRequirements req; vkGetBufferMemoryRequirements(V.dev, b, &req);
+    uint32_t t = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);   // cached: the game reads its own memory
+    if (t == UINT32_MAX) t = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+    VkMemoryDedicatedAllocateInfo ded = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, NULL, VK_NULL_HANDLE, b};
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &ded, req.size, t};
+    VkDeviceMemory m; void *at = NULL; int fd = -1; uint64_t fo = 0;
+    if (t == UINT32_MAX || vkAllocateMemory(V.dev, &ai, NULL, &m)) { vkDestroyBuffer(V.dev, b, NULL); return -5; }
+    if (vkBindBufferMemory(V.dev, b, m, 0) || vkMapMemory(V.dev, m, 0, VK_WHOLE_SIZE, 0, &at) || ((uintptr_t)at & 0xfff) || dev_mapping(at, &fd, &fo) || (fo & 0xfff)) {
+        vkDestroyBuffer(V.dev, b, NULL); vkFreeMemory(V.dev, m, NULL); return -6; }
+    memcpy(at, mem, size);
+    if (mmap(mem, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, (off_t)fo) != mem) { vkDestroyBuffer(V.dev, b, NULL); vkFreeMemory(V.dev, m, NULL); return -7; }
+    p->buf = b; p->mem = m; p->zero_copy = 1; p->dfd = fd; p->doff = fo;
+    return 0;
+}
 // A zero-copy pool's dma-buf mapped again over [mem, mem+len) in one piece, read-only (nvn_dirty_defrag: the mappings its protection split never merge). 0 = done
 int vk_pool_remap_ro(void *mem, size_t len) {
     int rc = -1;
     pthread_rwlock_rdlock(&g_pool_mu);
     for (int i = 0; i < g_npool; i++) {
         vkpool_t *p = &g_pool[i]; if (!p->zero_copy || p->lo != (uint64_t)(uintptr_t)mem || p->hi - p->lo != len) continue;
+        if (!p->ahb) { if (p->dfd >= 0) rc = mmap(mem, len, PROT_READ, MAP_SHARED | MAP_FIXED, p->dfd, (off_t)p->doff) == mem ? 0 : -1; break; }   // the driver's device file (pool_zero_copy_map)
         int sv[2], fds[16], nfd = -1; if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv)) break;
         if (!AHardwareBuffer_sendHandleToUnixSocket(p->ahb, sv[0])) nfd = recv_fds(sv[1], fds, 16);
         close(sv[0]); close(sv[1]);
@@ -221,9 +261,11 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     if (!size) return;
     pthread_rwlock_wrlock(&g_pool_mu);
     if (g_npool == MAXPOOL) { pthread_rwlock_unlock(&g_pool_mu); die("[vk] too many memory pools"); }
-    vkpool_t *p = &g_pool[g_npool]; memset(p, 0, sizeof *p);
+    vkpool_t *p = &g_pool[g_npool]; memset(p, 0, sizeof *p); p->dfd = -1;
     p->lo = (uint64_t)(uintptr_t)mem; p->hi = p->lo + size; { static uint64_t ser; p->serial = ++ser; }
     int zc = ((uintptr_t)mem & 0xfff) || (size & 0xfff) ? -3 : getenv("DM_VK_NO_ZEROCOPY") ? -4 : pool_zero_copy(p, (uint8_t *)mem, size);
+    if (zc == -1 && !(zc = pool_zero_copy_map(p, (uint8_t *)mem, size))) {   // no AHardwareBuffer for GPU data: the driver's device file mapped again instead
+        static int said; if (!said++) VKLOG("memory pools: no AHardwareBuffer for GPU data, zero copy through the driver's device file mapped again at the pool"); }
     if (zc) {
         static int said; if (!said++) VKLOG("[RED] memory pool %p +%#llx could not be zero-copy (%d): a GPU copy is refreshed before each submission (slow)", mem, (unsigned long long)size, zc);
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, size, POOL_USAGE, VK_SHARING_MODE_EXCLUSIVE};
