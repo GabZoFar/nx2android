@@ -7,7 +7,7 @@ import os, re, shutil, sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from porter import config, datapack, fpslocker, install, paths, profiles, toolchain
+from porter import config, datapack, fonts, fpslocker, install, paths, profiles, toolchain
 from porter.adb import Adb, AdbError
 from porter.paths import DM, NXNATIVE
 from porter.upstream import BuildError, PROG, android_profile, game, nacp, nsp, profile_guess, say
@@ -356,10 +356,12 @@ class Port:
 
     # ---- data: the files the app reads from its files folder ----
     def data(self):
-        PROG.stage('data pack', step='linking')
+        PROG.stage('data pack', step='the shared-font stand-ins')
+        font = fonts.make(self.aw / 'font', PY, self.env, self.logs)   # standard.ttf and nintendo_ext.ttf, as the iOS build ships them (porter/fonts.py)
+        env = self.fps_env + ([f'DM_FONT_DIR={datapack.files_folder(self.package)}/font'] if font else [])
         dst = self.o.out / f'{app_stem(self.g, self.app_name)}-data'
         man = datapack.build(dst, profile=self.ap, version=self.pkg_ver, display=self.display, patched=self.patched, romfs=self.game / 'RomFS', shaders=self.dmsv,
-                             aoc=self.aoc, language=self.lang, package=self.package, env=self.fps_env, files=self.fps_files, progress=lambda what: PROG.set(step=f'linking {what}'))
+                             aoc=self.aoc, language=self.lang, package=self.package, env=env, files={**self.fps_files, **font}, progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
 

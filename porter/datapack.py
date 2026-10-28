@@ -3,7 +3,8 @@
 #   RomFS/         the game's files (the packed version's merged RomFS)
 #   aoc/<index>/   the DLC the player has
 #   shaders.dmsv   the Vulkan shaders (dm/android/tools/shader_vk.py)
-#   env.txt        host switches: the game language, the DLC folder, the profile's env rows
+#   font/          the shared-font stand-ins, standard.ttf and nintendo_ext.ttf (porter/fonts.py), when the player's computer can make them
+#   env.txt        host switches: the game language, the DLC folder, the font folder, the profile's env rows
 #   settings.txt   the pause menu's first-launch defaults (the profile's setting rows); the installer never replaces the player's own
 #   nx2a-data.json what the pack is: the game, the package, the version, the device features the profile requires (android.tsv requires), which the installer checks
 # Big trees are hard links into the extraction when the volume allows, so the pack takes no extra space; the pack is rebuilt whole when anything in it changes.
@@ -46,7 +47,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
         if progress: progress(what)
         dn, db = link_tree(src, tmp / sub); n += dn; b += db
     link_or_copy(shaders, tmp / 'shaders.dmsv'); n += 1; b += shaders.stat().st_size
-    for name, src in (files or {}).items(): shutil.copyfile(src, tmp / name); n += 1; b += Path(src).stat().st_size
+    for name, src in (files or {}).items(): (tmp / name).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(src, tmp / name); n += 1; b += Path(src).stat().st_size
     rows = [f'# Written by nx2android\'s porter for {profile.name} ({profile.id}); KEY=VALUE per line, read by the app at launch',
             f'DM_LANG={language}']
     if aoc: rows.append(f'DM_AOC_DIR={files_folder(package)}/aoc')
