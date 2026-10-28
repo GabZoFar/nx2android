@@ -440,6 +440,34 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
     g_pace_target = t;
     return t - g_refresh_ns / 2;
 }
+// An sRGB window image (Link's Awakening's are RGBA8_SRGB, NVN format 0x38) holds the bytes the display shows as they are, and nvn_mtl.m presents it through a UNORM
+// view (present_raw_src). vkCmdBlitImage converts between formats: into the UNORM swapchain it decoded them to linear first, and the picture came out with its gamma
+// applied twice (Marin and Tarin's house 2-5 times too dark per channel against a Switch capture). The image is copied raw (vkCmdCopyImage: the same texel size,
+// no conversion) into a UNORM twin, which is blitted instead: the house's floor then read (140, 92, 39), as in the capture
+static VkImage g_raw; static VkDeviceMemory g_raw_mem; static uint32_t g_raw_w, g_raw_h; static VkFormat g_raw_fmt;
+static VkImage raw_twin(VkCommandBuffer cb, const vkimg_t *im, uint32_t k) {
+    VkFormat f = im->fmt == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : im->fmt == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM :
+                 im->fmt == VK_FORMAT_A8B8G8R8_SRGB_PACK32 ? VK_FORMAT_A8B8G8R8_UNORM_PACK32 : VK_FORMAT_UNDEFINED;
+    if (f == VK_FORMAT_UNDEFINED) return im->img;
+    if (!g_raw || g_raw_w != im->w || g_raw_h != im->h || g_raw_fmt != f) {
+        if (g_raw) {   // presents still in flight may read the old one
+            VkFence fs[8]; uint32_t n = 0; for (uint32_t i = 0; i < 8; i++) if (i != k) fs[n++] = g_pfence[i];
+            vkWaitForFences(V.dev, n, fs, 1, UINT64_MAX); vkDestroyImage(V.dev, g_raw, NULL); vkFreeMemory(V.dev, g_raw_mem, NULL); g_raw = VK_NULL_HANDLE; }
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, f, {im->w, im->h, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+        if (vkCreateImage(V.dev, &ci, NULL, &g_raw)) { g_raw = VK_NULL_HANDLE; return im->img; }
+        VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, g_raw, &rq);
+        VkMemoryAllocateInfo ma = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
+        if (vkAllocateMemory(V.dev, &ma, NULL, &g_raw_mem) || vkBindImageMemory(V.dev, g_raw, g_raw_mem, 0)) { vkDestroyImage(V.dev, g_raw, NULL); g_raw = VK_NULL_HANDLE; return im->img; }
+        g_raw_w = im->w; g_raw_h = im->h; g_raw_fmt = f;
+        barrier(cb, g_raw, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        VKLOG("present: the %ux%u sRGB window image goes to the screen as its bytes (a raw copy into a UNORM image, then the blit)", im->w, im->h);
+    }
+    VkImageCopy r = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {im->w, im->h, 1}};
+    vkCmdCopyImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_raw, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    vk_img_barrier_all(cb);
+    return g_raw;
+}
 static void present_window(vkimg_t *im, const int crop[4], double period) {   // period: the game's frame period (s); < 0 for a redraw of the last frame (no time)
     uint32_t k = g_pi++ % 8;
     vkWaitForFences(V.dev, 1, &g_pfence[k], 1, UINT64_MAX);
@@ -457,7 +485,10 @@ static void present_window(vkimg_t *im, const int crop[4], double period) {   //
     double s = fmin((double)g_sext.width / cw, (double)g_sext.height / ch); int dw = (int)(cw * s), dh = (int)(ch * s), dx = ((int)g_sext.width - dw) / 2, dy = ((int)g_sext.height - dh) / 2;
     vk_pic_set((float)dx / g_sext.width, (float)dy / g_sext.height, (float)dw / g_sext.width, (float)dh / g_sext.height);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
-    vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_simg[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+    // lower-left origin (Link's Awakening keeps NVN's default): the window image is stored bottom-up, so it is flipped within its crop, which counts memory rows as in
+    // upper-left mode (nvn_mtl.m g_origin_ll does the same at present); unflipped, the whole picture was upside down
+    if (vk_lower_left()) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }
+    vkCmdBlitImage(cb, raw_twin(cb, im, k), VK_IMAGE_LAYOUT_GENERAL, g_simg[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     int ovm = dm_overlay_visible(), menu = dm_menu_state(), fps = dm_overlay_fps();
     if ((ovm || menu >= 0 || fps) && overlay_ready(cb, k, menu)) {
@@ -511,9 +542,9 @@ static void shot(vkimg_t *im, uint64_t n) {
     FILE *f = fopen(path, "wb");
     if (!f) { VKLOG("[RED] cannot write %s", path); return; }
     fprintf(f, "P6\n%u %u\n255\n", w, h);
-    int bgra = im->fmt == VK_FORMAT_B8G8R8A8_UNORM || im->fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    int bgra = im->fmt == VK_FORMAT_B8G8R8A8_UNORM || im->fmt == VK_FORMAT_B8G8R8A8_SRGB, ll = vk_lower_left();   // a lower-left window image is stored bottom-up: written top row first, as shown
     uint8_t *row = malloc((size_t)w * 3);
-    for (uint32_t y = 0; y < h; y++) { const uint8_t *s = p + (size_t)y * w * 4; for (uint32_t x = 0; x < w; x++) { row[3 * x] = s[4 * x + (bgra ? 2 : 0)]; row[3 * x + 1] = s[4 * x + 1]; row[3 * x + 2] = s[4 * x + (bgra ? 0 : 2)]; } fwrite(row, 1, (size_t)w * 3, f); }
+    for (uint32_t y = 0; y < h; y++) { const uint8_t *s = p + (size_t)(ll ? h - 1 - y : y) * w * 4; for (uint32_t x = 0; x < w; x++) { row[3 * x] = s[4 * x + (bgra ? 2 : 0)]; row[3 * x + 1] = s[4 * x + 1]; row[3 * x + 2] = s[4 * x + (bgra ? 0 : 2)]; } fwrite(row, 1, (size_t)w * 3, f); }
     free(row); fclose(f);
     VKLOG("frame %llu written to %s (%ux%u)", (unsigned long long)n, path, w, h);
 }

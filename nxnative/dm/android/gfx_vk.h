@@ -149,6 +149,7 @@ VkBuffer vk_zero_buffer(void);
 // ---- replay (gfx_vk_exec.c) ----
 void vk_exec_reset(void);   // per submission
 void vk_end_pass(void);     // close an open render pass
+int vk_lower_left(void);    // NVN's lower-left window origin (the game kept NVN's default): the window image is stored bottom-up, flipped at present and in frame shots
 
 // ---- presentation (gfx_vk_present.c) ----
 void vk_present_init(void);

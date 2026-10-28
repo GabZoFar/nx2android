@@ -107,6 +107,55 @@ def job_for(key, stage, rec, w):   # dmsh_build.py job_for; transform feedback i
     else: j['no_facts'] = True
     return j, c1
 
+# ---- vertex outputs start as (0, 0, 0, 1), as dmsh_build.py vs_init does for Metal ----
+def vs_init(spv):
+    """On the hardware an output component the vertex shader never writes reads (0, 0, 0, 1). The translator initializes only the components the next stage reads, which
+    it knows when stages are linked; each shader is translated alone here, so no user output was, and Vulkan leaves unwritten components undefined. The Metal chain gives
+    every output this start (dmsh_build.py vs_init: Link's Awakening writes a world position's xyz only, its pixel shaders divide by w, and with w = 0 every outdoor shadow
+    test failed); the Vulkan bundle had no such step. Every vec4 float Output with a Location gets that value stored at the entry point's start, before the body writes"""
+    w = list(struct.unpack(f'<{len(spv) // 4}I', spv))
+    ep, fn0, fl32, vec, ptr, loc, outs, consts, comps = None, None, None, {}, {}, set(), [], {}, {}
+    i = 5
+    while i < len(w):
+        n, op = w[i] >> 16, w[i] & 0xffff
+        if n == 0: return spv
+        if op == 15 and w[i + 1] == 0: ep = w[i + 2]                                            # OpEntryPoint Vertex
+        elif op == 71 and n == 4 and w[i + 2] == 30: loc.add(w[i + 1])                          # OpDecorate Location
+        elif op == 22 and n == 3 and w[i + 2] == 32: fl32 = w[i + 1]                            # OpTypeFloat 32
+        elif op == 23 and n == 4: vec[w[i + 1]] = (w[i + 2], w[i + 3])                          # OpTypeVector
+        elif op == 32 and n == 4: ptr[w[i + 1]] = (w[i + 2], w[i + 3])                          # OpTypePointer
+        elif op == 43 and n == 4: consts[(w[i + 1], w[i + 3])] = w[i + 2]                       # OpConstant
+        elif op == 44 and n == 7: comps[(w[i + 1],) + tuple(w[i + 3:i + 7])] = w[i + 2]         # OpConstantComposite of 4
+        elif op == 59 and n >= 4 and w[i + 3] == 3: outs.append((w[i + 2], w[i + 1]))           # OpVariable Output
+        elif op == 54 and fn0 is None: fn0 = i                                                  # the first OpFunction
+        i += n
+    v4 = next((t for t, (c, k) in vec.items() if c == fl32 and k == 4), None)
+    targets = [v for v, pt in outs if v in loc and ptr.get(pt, (0, 0))[1] == v4]
+    if ep is None or fn0 is None or v4 is None or not targets: return spv
+    bound, decl = w[3], []
+    def const(bits):
+        nonlocal bound
+        if (fl32, bits) in consts: return consts[(fl32, bits)]
+        consts[(fl32, bits)] = bound; decl.extend([4 << 16 | 43, fl32, bound, bits]); bound += 1; return bound - 1
+    c0, c1 = const(0), const(0x3f800000)
+    c = comps.get((v4, c0, c0, c0, c1))
+    if c is None: c = bound; decl.extend([7 << 16 | 44, v4, c, c0, c0, c0, c1]); bound += 1
+    # the entry function's first block: after its OpLabel and the OpVariables (and debug lines) that must open it
+    i = fn0; at = None
+    while i < len(w):
+        n, op = w[i] >> 16, w[i] & 0xffff
+        if op == 54: in_ep = w[i + 2] == ep
+        elif op == 248 and in_ep and at is None:
+            j = i + n
+            while j < len(w) and (w[j] & 0xffff) in (59, 8, 317): j += w[j] >> 16
+            at = j; break
+        i += n
+    if at is None: return spv
+    stores = [x for v in targets for x in (3 << 16 | 62, v, c)]                                 # OpStore
+    w = w[:fn0] + decl + w[fn0:at] + stores + w[at:]
+    w[3] = bound
+    return struct.pack(f'<{len(w)}I', *w)
+
 # ---- SPIR-V reflection: descriptor bindings with the translator's names, decoded as dmsh_build.py reflect decodes the MSL names ----
 OP_NAME, OP_DECORATE, OP_VARIABLE, OP_TYPE_POINTER, OP_TYPE_ARRAY, OP_TYPE_RUNTIME_ARRAY, OP_TYPE_IMAGE, OP_TYPE_SAMPLED_IMAGE, OP_TYPE_SAMPLER, OP_TYPE_STRUCT, OP_CONSTANT, OP_EXECUTION_MODE = 5, 71, 59, 32, 28, 29, 25, 27, 26, 30, 43, 16
 DEC_BINDING, DEC_SET, DEC_BLOCK, DEC_BUFFER_BLOCK, DEC_NONWRITABLE = 33, 34, 2, 3, 24
@@ -281,8 +330,9 @@ def main():
         spv_p, res_p = os.path.join(w, k + '.spv'), os.path.join(w, k + '.res.json')
         if not os.path.exists(spv_p): fails['no output'] += 1; continue
         spv = open(spv_p, 'rb').read(); res = json.load(open(res_p)) if os.path.exists(res_p) else {}
-        binds, local, io = spirv_bindings(spv)
         st = stages[k]
+        if st == 'vs': spv = vs_init(spv)
+        binds, local, io = spirv_bindings(spv)
         cl = [classify(st, b, res) for b in binds]
         for e in cl: kinds_all[e['kind']] += 1
         # header words 2-4: a compute shader's local size; a vertex shader's input locations (all, signed int, unsigned int); a pixel shader's output locations
