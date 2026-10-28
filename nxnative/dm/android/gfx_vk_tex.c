@@ -84,6 +84,10 @@ const vkfmt_t *vk_fmt(int f) {
             o->compressed = o->bw > 1 || o->bh > 1;
             o->is_int = e.kind == K_INT || e.kind == K_SINT; o->is_sint = e.kind == K_SINT; o->kind = 1;
             o->swz = (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, e.noalpha ? VK_COMPONENT_SWIZZLE_ONE : VK_COMPONENT_SWIZZLE_IDENTITY};
+            if (V.astc_cpu && o->vk >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && o->vk <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) {   // decoded on the CPU (pkg_upload_) into an RGBA8 image
+                o->abw = o->bw; o->abh = o->bh; o->bw = o->bh = 1; o->bpb = 4; o->compressed = 0;
+                o->vk = (o->vk - VK_FORMAT_ASTC_4x4_UNORM_BLOCK) & 1 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+            }
             if ((o->compressed && o->vk >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && o->vk <= VK_FORMAT_BC7_SRGB_BLOCK && !V.has_bc) ||
                 (o->vk >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && o->vk <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && !V.has_astc)) o->kind = 0;
         }
@@ -199,7 +203,14 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
         uint32_t bx = (w + bw - 1) / bw, by = (h + bh - 1) / bh; size_t pitch = (size_t)bx * bpb, slab = pitch * by * z;
         for (unsigned ly = 0; ly < im->layers; ly++) {
             VkBuffer sb; VkDeviceSize so; uint8_t *dst = vk_scratch(slab, 16, &sb, &so);
-            if (linear) {   // linear storage: rows of the texture's stride, one level, one layer
+            if (f->abw) {   // ASTC decoded here (V.astc_cpu): its blocks in rows as the device would take them, then each decoded into dst's RGBA8 rows
+                unsigned abx = (w + f->abw - 1) / f->abw, aby = (h + f->abh - 1) / f->abh; size_t ap = (size_t)abx * 16;
+                uint8_t *blk = malloc(ap * aby * z); if (!blk) return;
+                if (linear) { size_t stride = t->d.stride ? t->d.stride : ap; for (uint32_t y = 0; y < aby * z; y++) memcpy(blk + y * ap, t->mem + (size_t)y * stride, ap); }
+                else if (nvn_deswizzle(&t->d, lv, ly, t->mem, blk, ap)) { free(blk); VKRED_ONCE(13, "deswizzle refused texture format %#x target %d", t->d.format, t->d.target); return; }
+                vk_astc_decode(blk, f->abw, f->abh, w, h, z, f->vk == VK_FORMAT_R8G8B8A8_SRGB, dst, pitch);
+                free(blk);
+            } else if (linear) {   // linear storage: rows of the texture's stride, one level, one layer
                 size_t stride = t->d.stride ? t->d.stride : pitch;
                 for (uint32_t y = 0; y < by * z; y++) memcpy(dst + y * pitch, t->mem + (size_t)y * stride, pitch);
             } else if (nvn_deswizzle(&t->d, lv, ly, t->mem, dst, pitch)) { VKRED_ONCE(13, "deswizzle refused texture format %#x target %d", t->d.format, t->d.target); return; }

@@ -1359,6 +1359,7 @@ static void copy_b2t(const p_copy_b2t *c, int to_texture) {
     vk_end_pass_land();
     vkimg_t *im = vk_tex(c->tex); const vkfmt_t *f = vk_fmt(c->tex->d.format);
     if (!im || !f) return;
+    if (f->abw) { VKRED_ONCE(73, "buffer ↔ texture copy of an ASTC texture decoded on the CPU (%ux%u): skipped", c->tex->d.width, c->tex->d.height); return; }   // its image holds RGBA8
     VkBuffer b; VkDeviceSize o;
     if (!vk_buf_at(c->src, 1, &b, &o)) { VKRED_ONCE(70, "buffer of a buffer ↔ texture copy outside the memory pools"); return; }
     VkCommandBuffer cb = vk_cmd(); vk_tex_prepare(cb, im); vk_img_barrier_all(cb);
@@ -1383,7 +1384,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     VkImageSubresourceLayers ss = sub_of(s, &c->sv, c->has_sv, c->sr.zoffset), ds = sub_of(d, &c->dv, c->has_dv, c->dr.zoffset);
     // a depth-stencil texture's copy carries its stencil too, as NVN's does (sub_of gives one aspect, which buffer copies need): with the depth alone the copy's
     // stencil was never written. Link's Awakening stencil-tests its half-size copies of its depth-stencil buffer (a 480x270 mask pass, NOTEQUAL bit 1), whose
-    // output changed with this; the black around each room, which this was tried for, stays
+    // output changed with this. (The black around each room, which this was tried for, was the emulator's ASTC: gfx_vk_astc.c)
     VkImageAspectFlags dsa = s->aspect & d->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
     if (dsa == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) && ss.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT && ds.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT) ss.aspectMask = ds.aspectMask = dsa;
     // Vulkan refuses (vkEndCommandBuffer fails for the whole submission) a region outside either image or a blit the format cannot do: regions are clipped

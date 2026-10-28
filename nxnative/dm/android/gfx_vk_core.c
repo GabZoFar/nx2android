@@ -45,6 +45,56 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vk_validation_msg(VkDebugUtilsMessageSever
     return VK_FALSE;
 }
 
+// Whether the device reads ASTC back as it was given: a solid red block (void extent) copied into a 4x4 ASTC image, blitted to RGBA8 and read back. The Android
+// emulator on a Mac (37.2.12; gfxstream's "ASTC LDR emulation mode: Gpu" over MoltenVK) reports ASTC and read (0, 0, 0, 0) from it, in a blit and in a compute
+// shader's texelFetch alike, while BC1 read red: Link's Awakening's ASTC hearts drew nothing. 1 also when the format cannot be blitted (nothing to look at)
+static int astc_reads_back(void) {
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_ASTC_4x4_UNORM_BLOCK, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) return 1;
+    int ok = 1; VkBuffer b = VK_NULL_HANDLE; VkDeviceMemory bm = VK_NULL_HANDLE, im_m[2] = {0}; VkImage im[2] = {0}; VkCommandPool cp = VK_NULL_HANDLE; uint8_t *p = NULL;
+    VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, 256, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VkMemoryRequirements rq; VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    if (vkCreateBuffer(V.dev, &bci, NULL, &b)) goto done;
+    vkGetBufferMemoryRequirements(V.dev, b, &rq); ai.allocationSize = rq.size; ai.memoryTypeIndex = vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+    if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(V.dev, &ai, NULL, &bm) || vkBindBufferMemory(V.dev, b, bm, 0) || vkMapMemory(V.dev, bm, 0, 256, 0, (void **)&p)) goto done;
+    static const uint8_t red[16] = {0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF};   // void extent: RGBA16 (1, 0, 0, 1)
+    memset(p, 0, 256); memcpy(p, red, 16);
+    VkFormat fm[2] = {VK_FORMAT_ASTC_4x4_UNORM_BLOCK, VK_FORMAT_R8G8B8A8_UNORM};
+    for (int k = 0; k < 2; k++) {
+        VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, fm[k], {4, 4, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+        if (vkCreateImage(V.dev, &ic, NULL, &im[k])) goto done;
+        vkGetImageMemoryRequirements(V.dev, im[k], &rq); ai.allocationSize = rq.size; ai.memoryTypeIndex = vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+        if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(V.dev, &ai, NULL, &im_m[k]) || vkBindImageMemory(V.dev, im[k], im_m[k], 0)) goto done;
+    }
+    VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, 0, V.qf}; VkCommandBuffer cb;
+    VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, VK_NULL_HANDLE, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+    if (vkCreateCommandPool(V.dev, &pci, NULL, &cp)) goto done;
+    cai.commandPool = cp; VkCommandBufferBeginInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    if (vkAllocateCommandBuffers(V.dev, &cai, &cb) || vkBeginCommandBuffer(cb, &cbi)) goto done;
+    VkImageMemoryBarrier ib[2]; VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    for (int k = 0; k < 2; k++) ib[k] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, im[k], {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 2, ib);
+    VkBufferImageCopy up = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {4, 4, 1}}, down = {64, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {4, 4, 1}};
+    vkCmdCopyBufferToImage(cb, b, im[0], VK_IMAGE_LAYOUT_GENERAL, 1, &up);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {4, 4, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {4, 4, 1}}};
+    vkCmdBlitImage(cb, im[0], VK_IMAGE_LAYOUT_GENERAL, im[1], VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdCopyImageToBuffer(cb, im[1], VK_IMAGE_LAYOUT_GENERAL, b, 1, &down);
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT; vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cb};
+    if (vkEndCommandBuffer(cb) || vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE) || vkQueueWaitIdle(V.q)) goto done;
+    for (int t = 0; t < 16; t++) if (p[64 + 4 * t] != 255 || p[65 + 4 * t] || p[66 + 4 * t] || p[67 + 4 * t] != 255) ok = 0;
+    if (!ok) VKLOG("ASTC: a solid red block reads back as (%u, %u, %u, %u)", p[64], p[65], p[66], p[67]);
+done:
+    if (cp) vkDestroyCommandPool(V.dev, cp, NULL);
+    for (int k = 0; k < 2; k++) { if (im[k]) vkDestroyImage(V.dev, im[k], NULL); if (im_m[k]) vkFreeMemory(V.dev, im_m[k], NULL); }
+    if (b) vkDestroyBuffer(V.dev, b, NULL); if (bm) vkFreeMemory(V.dev, bm, NULL);
+    return ok;
+}
+
 void vk_init(void) {
     static int done; if (done) return; done = 1;
     void *lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
@@ -132,6 +182,8 @@ void vk_init(void) {
     VKLOG("%s, Vulkan %u.%u, driver %#x; BC %s, ASTC %s, geometry shaders %s, nullDescriptor %s, custom border colours %s, depth clip control %s, transform feedback %s; pipeline cache %zu bytes",
           V.props.deviceName, VK_API_VERSION_MAJOR(V.props.apiVersion), VK_API_VERSION_MINOR(V.props.apiVersion), V.props.driverVersion,
           V.has_bc ? "yes" : "no", V.has_astc ? "yes" : "no", V.has_gs ? "yes" : "no", V.has_robust2 ? "yes" : "no", V.has_custom_border ? "yes" : "no", V.has_depth_clip_ctl ? "yes" : "no", V.has_xfb ? "yes" : "no", dn);
+    { const char *e = getenv("DM_VK_ASTC_CPU"); V.astc_cpu = e && *e ? atoi(e) != 0 : !V.has_astc || !astc_reads_back();   // DM_VK_ASTC_CPU=1 / =0: either way
+      if (V.astc_cpu) VKLOG("ASTC textures are decoded on the CPU into RGBA8 (%s)", e && *e ? "DM_VK_ASTC_CPU" : !V.has_astc ? "the device has no ASTC" : "the device reads ASTC back wrong"); }
     slots_init();
     completion_start();
 }
