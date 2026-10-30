@@ -2,7 +2,7 @@
 # devices (a 6 GB RomFS), so small files go in batches and big files in 64 MB pieces that the device joins; a rerun resumes (files already at their size are skipped,
 # pieces already in place are kept). The port's own outputs are also compared by MD5: a rewriter cut changes a module without changing its size, and Unpacking's sdk cuts never
 # reached the device until they were. Pushes use -Z: compressing them took adbd down.
-import contextlib, hashlib, json, os, shlex, shutil, subprocess, tempfile, time
+import contextlib, hashlib, json, os, re, shlex, shutil, subprocess, tempfile, time
 from pathlib import Path
 
 
@@ -97,11 +97,22 @@ class Adb:
     def installed(self, package):
         return f'package:{package}' in self.shell(f'pm list packages {shlex.quote(package)}', check=False).split()
 
+    def version_code(self, package):   # the installed app's versionCode, None when unknown
+        try: out = self.shell(f'dumpsys package {shlex.quote(package)} | grep -m1 versionCode=', check=False)
+        except AdbError: return None
+        m = re.search(r'versionCode=(\d+)', out)
+        return int(m.group(1)) if m else None
+
     # ---- install ----
     def install(self, apk, package, replace_signer=False):
         """adb install -r. A package installed with another signing key cannot be updated: replace_signer uninstalls it first (its saves in internal storage go with it)"""
         try: self.run('install', '-r', apk, timeout=600, retries=1)
         except AdbError as e:
+            if 'INSTALL_FAILED_VERSION_DOWNGRADE' in str(e):   # Android installs over the same versionCode, never over a higher one
+                have = self.version_code(package)
+                raise AdbError(f'{package} is installed with a higher versionCode{f" ({have})" if have else ""} (a port of a later game version, a rebuild with --vercode-offset): '
+                               'port again with a --vercode-offset that lifts this build above it (the saves stay), install it beside that one with --package, '
+                               'or uninstall that one on the device (its saves are deleted with it)') from e
             if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' not in str(e): raise
             if not replace_signer:
                 raise AdbError(f'{package} is installed with another signing key (another build of the game, a development build): '
@@ -113,16 +124,39 @@ class Adb:
     def prepare_app_files(self, package, timeout=30):
         """Have Android create the app's files folder (/sdcard/Android/data/<package>/files) before anything is pushed into it: the system makes it, owned by the app with
         the app's group, when the app first asks for it. A folder the shell makes first lacks that group underneath FUSE, and the app cannot read what is pushed below it
-        (NEO's port died at its first open, mods/main.fixups.tsv). So the app is started once (it stops at once without its data) and stopped again"""
-        files = f'/sdcard/Android/data/{package}/files'
-        if self.shell(f'[ -d {shlex.quote(files)} ] && echo yes; true').strip() == 'yes': return False
+        (NEO's port died at its first open, mods/main.fixups.tsv). So the app is started once (it stops at once without its data) and stopped again.
+        A folder already there that the app did not make (pushed by hand before the app first ran, or left by an install with another uid) is moved aside, made again by the
+        app, and its contents moved back in (a rename: nothing is pushed again). Issue #9: on a Honor tablet the app opened its modules by name but could not list RomFS, and
+        Mario vs. Donkey Kong crashed at boot"""
+        files = f'/sdcard/Android/data/{package}/files'; old = f'{files}.nx2a-old'
+        isdir = lambda p: self.shell(f'[ -d {shlex.quote(p)} ] && echo yes; true').strip() == 'yes'
+        if isdir(files):
+            uid, owner = self.app_uid(package), self.shell(f'stat -c %u {shlex.quote(files)}', check=False).strip()
+            if uid is None or owner == str(uid):
+                if isdir(old): self.move_back(old, files)   # an earlier repair stopped before its contents went back
+                return False
+            if isdir(old): raise AdbError(f'{files} needs to be made again by the app, but {old} is already there (left by an earlier repair): move what you need out of it and delete it')
+            self.log(f'{files} belongs to uid {owner}, not to the app (uid {uid}): letting the app make it again and moving its contents back in')
+            self.shell(f'mv {shlex.quote(files)} {shlex.quote(old)}')
         self.shell(f'am start -W -n {package}/android.app.NativeActivity >/dev/null 2>&1; true', timeout=60)
         for _ in range(timeout * 2):
-            if self.shell(f'[ -d {shlex.quote(files)} ] && echo yes; true').strip() == 'yes': break
+            if isdir(files): break
             time.sleep(0.5)
-        else: raise AdbError(f'{package} did not create its files folder ({files}) within {timeout} s of starting')
+        else: raise AdbError(f'{package} did not create its files folder ({files}) within {timeout} s of starting' + (f'; its old contents are in {old}' if isdir(old) else ''))
         self.shell(f'am force-stop {package}')
+        if isdir(old): self.move_back(old, files)
         return True
+
+    def app_uid(self, package):   # the app's Linux uid for the device's user 0, None when the package is not installed
+        prev = ''
+        for ln in self.shell(f'pm list packages -U {shlex.quote(package)}', check=False).split():
+            if ln.startswith('uid:') and prev == f'package:{package}': return int(ln[4:].split(',')[0])
+            prev = ln
+        return None
+
+    def move_back(self, old, files):   # everything in old into files (a rename on the same storage: nothing is copied), then old removed
+        q, f = shlex.quote(old), shlex.quote(files)
+        self.shell(f'cd {q} && for e in * .[!.]*; do [ -e "$e" ] && mv -f "$e" {f}/; done; cd / && rmdir {q}')
 
     def pull_new(self, rdir, local, pattern=None):   # the files directly in rdir that local lacks (at their size), pulled into local → their names
         local = Path(local); got = []

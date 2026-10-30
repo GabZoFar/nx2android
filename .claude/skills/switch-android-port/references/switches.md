@@ -51,7 +51,7 @@ The source of each switch is in `nxnative/dm/android/` unless noted. Check the c
 | `DM_VK_X_NOSETC`, `X_NODRVC`, `X_LANDCUT`, `X_NOKEEP`, `X_NOSHC` | live | flicker experiments: no descriptor-set reuse; no driver-segment reuse; deferred uniform updates land at each cut; no pass kept for repeated targets; no uniform-shadow reuse |
 | `DM_VK_DYN_UBO=0` | start-up | no dynamic uniform-buffer offsets (descriptor reuse drops) |
 | `DM_VK_NOPREWARM=1` | start-up | no pipeline prewarm |
-| `DM_VK_UBWC=1` | start-up | experiment: format lists instead of mutable formats on colour images |
+| `DM_VK_UBWC=3` | start-up (`gfx_vk_tex.c`) | default 3 (bits): 1, colour images get a format list (their format and its sRGB twin) instead of MUTABLE_FORMAT; 2, depth images neither MUTABLE_FORMAT nor EXTENDED_USAGE. Adreno then keeps its UBWC compression: Super Mario Bros. Wonder's world map 11.8 → 8.7-8.9 ms of GPU (9.5-10.0 with 1 alone), Unicorn Overlord 35-40% less on the Adreno 730. A colour view in another format falls back to the image's own and logs `[RED] view format … of a format-listed image`: such a game wants `2` (or `0`) in its profile |
 | `DM_VK_SYNC_PRESENT=1` | start-up | present on the game thread instead of the present thread |
 | `DM_NVN_ASYNC=1` | start-up (`gfx/nvn/hle_nvn.c`) | asynchronous replay: submissions and presents run on a replay thread, syncs wait for the job's replay and then its GPU fence. Xenoblade Chronicles 3 has it in its profile (`env`): the replay (~26 ms a frame in Resolution-mode battles) overlaps the game's render thread; the window acquire then waits for every job queued so far to be replayed (`DM_NVN_ACQ_REPLAYED`), and texture registrations are seen by each job as they were when it was queued (`gfx_vk_tex.c`). Off by default; `[timeline]` lines show the frame |
 | `DM_NVN_ACQ_REPLAYED=0` | start-up (`gfx/nvn/hle_nvn.c`) | with `DM_NVN_ASYNC=1`: the window acquire does not wait for the queued jobs' replay. XC3 then drew whole-screen garbage (solid colours, smears) while the camera turned in about half of the recordings; with the wait at the next submission instead, 2 of 6 |
@@ -76,6 +76,7 @@ The source of each switch is in `nxnative/dm/android/` unless noted. Check the c
 | `DM_NO_ADPF=1` | start-up | no Android performance hints |
 | `DM_OPMODE=0/1` | start-up (`host/hle_oe.c`) | handheld / docked at launch. The pause menu's Mode setting (`docked=` in `settings.txt`) overrides it and switches live |
 | `DM_AUDIO=0` | start-up (`host/hle_audio.c`) | silent sink (Android defaults to real output) |
+| `DM_SHAKE_G=1.5` | start-up (`android/front_android.c`) | how hard (in G beyond gravity, 1.5 by default) the device must be shaken for the controller's six-axis sensor to be shaken (`DM_BTN_SHAKE`, `host/hle_hid.c`; Super Mario Odyssey's cap throw). Each detected shake logs `front end: device shaken (peak … G)`; `ctl.txt` `Shake~0.4` shakes it without the device |
 | `DM_TOUCH_DOCKED=screen` | first touch read (`host/hle_touch.c`) | profile env: docked touch points as a game that takes the panel's values as screen pixels expects them (Unity 2019.4: x = screen column, y = screen row − 360 on 1920x1080). On Android touches reach the game in both modes (`hle_hid.c` `touch_on`); a Switch has no docked touch |
 
 ## Control file lines (`ctl.txt`)
@@ -83,6 +84,7 @@ The source of each switch is in `nxnative/dm/android/` unless noted. Check the c
 - **Sticks:** `LUp`, `LDown`, `LLeft`, `LRight` (same for `R…`).
 - **Hold and combine:** `~seconds` sets the hold (default 0.15), e.g. `A~0.2`. `+` combines keys.
 - **Touch:** `T<x>x<y>` taps a normalized point.
+- **Motion:** `Shake` shakes player 1's controller (its six-axis sensor) for the hold, at least one whole shake.
 - **Other lines:** `env KEY=VALUE`, `shot <path>`, `passdump <n>`, `drag x0 y0 x1 y1 [s]`. A line starting with `#` is ignored.
 - **Delays:** an unknown key name logs `[RED]` but still waits its hold, so `none~0.1` works as a delay between lines.
 - **Replay:** the reader starts at the file's end when the app launches; lines from earlier runs are never replayed.

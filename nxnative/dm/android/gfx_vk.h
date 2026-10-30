@@ -50,9 +50,9 @@ typedef struct {
     VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; uint32_t qf;
     VkPhysicalDeviceProperties props; VkPhysicalDeviceMemoryProperties mem;
     VkPipelineCache pcache;
-    int has_bc, has_astc, has_gs, has_depth_clip_ctl, has_custom_border, has_robust2, has_xfb, has_imageless, has_dtiming;
+    int has_bc, has_astc, has_gs, has_depth_clip_ctl, has_custom_border, has_robust2, has_xfb, has_imageless, has_dtiming, has_dynrender;
     int astc_cpu;   // ASTC textures are decoded on the CPU into RGBA8 images (gfx_vk_astc.c): the device has no ASTC, or reads it back wrong (vk_init)
-    int has_timeline, has_rp2, has_dynren;   // the driver gives vkWaitSemaphores, vkCreateRenderPass2, dynamic rendering (vk_init asks the device itself)
+    int has_timeline, has_rp2;   // the device gives vkWaitSemaphores, vkCreateRenderPass2 (by either name; vk_init asks the device itself)
     float max_aniso;
 } vkdev_t;
 extern vkdev_t V;
@@ -62,7 +62,7 @@ VkResult vk_create_render_pass(const VkRenderPassCreateInfo2 *ci, VkRenderPass *
 void vk_fb_view_gone(VkImageView v);   // gfx_vk_exec.c: a view is being destroyed, and the framebuffers made over it (without imageless framebuffers) with it
 
 // ---- memory pools (gfx_vk_core.c): the guest's pool memory is GPU memory (AHardwareBuffer mapped over it) ----
-typedef struct { uint64_t lo, hi; VkBuffer buf; VkDeviceMemory mem; void *ahb; int zero_copy; uint8_t *shadow; uint64_t serial; int dfd; uint64_t doff; } vkpool_t;   // serial: unique per pool made (caches of views over a pool's buffer key on it);
+typedef struct { uint64_t lo, hi; VkBuffer buf; VkDeviceMemory mem; void *ahb; int zero_copy; uint8_t *shadow; uint64_t serial, base, end; int flags, synced; uint64_t stamp, stamp0; const void *span; int dfd; uint64_t doff; } vkpool_t;   // serial: unique per pool made (caches of views over a pool's buffer key on it); [base, end): the game's pool, of which [lo, hi) is one chunk (ZC_CHUNK); flags: the NVN pool's (vk_pool_set_flags); synced, stamp, stamp0, span: a copied pool's incremental sync
                                                                                                                                        // dfd / doff: the driver's device file and offset a zero-copy pool without an AHardwareBuffer maps
 vkpool_t *vk_pool_of(uint64_t addr, uint64_t len);   // the pool containing [addr, addr+len), NULL if none
 int vk_buf_at(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // GPU buffer + offset of a pool address range
@@ -105,6 +105,7 @@ struct vkimg {
     uint64_t depth_sub;   // the submission (gfx_vk_exec.c g_set_epoch) whose passes last used it as their depth attachment
     uint64_t depth_cut;   // and the command buffer within it (gfx_vk_exec.c g_cuts)
     int fixed_fmt;   // created with a format list (DM_VK_UBWC): views only in its format or its sRGB twin
+    VkFormat fmt2;   // with fixed_fmt: the other format of its list (its sRGB twin), VK_FORMAT_UNDEFINED when the list is its format alone
     VkImageView full;               // a view of the whole image as created
     VkBufferView tbuf;              // buffer textures: a texel buffer view of the pool
     uint64_t last_use;              // submission fence of the last use
@@ -114,6 +115,7 @@ struct vkimg {
 };
 vkimg_t *vk_tex(const tex_t *t);                                 // the image of a texture object (created, uploaded or refreshed as needed)
 void vk_lrz_forget(vkimg_t *im);                                 // an image is being dropped: the pass code forgets it (gfx_vk_exec.c)
+int vk_window_bottom_up(void);                                   // the game draws in lower-left origin mode: its window image is stored bottom-up (gfx_vk_exec.c)
 VkImageView vk_tex_view(const tex_t *t, const view_t *v, int dim, int arrayed, int as_attachment, vkimg_t **img_out);   // a view for sampling / storage / rendering
 void vk_watch(const vkimg_t *im, const char *what);   // DM_VK_WATCH (gfx_vk_exec.c)
 vkimg_t *vk_tex_by_id(int tid, const view_t **view_out, const tex_t **tex_out);   // registered texture ID → image (NULL if none)
@@ -148,6 +150,7 @@ typedef struct {
     uint8_t in_kind[32];                // a vertex shader's inputs by location: their numeric type as declared (0 none, 1 uint, 2 int, 3 float)
     int depth_repl;                     // a fragment shader that writes gl_FragDepth (DepthReplacing / DepthGreater / DepthLess)
     uint32_t in_locs, out_locs;         // the vec4 (or per-vertex vec4) inputs and outputs it declares, by location
+    int setmemo;                        // gfx_vk_exec.c stage_set: 1 its set may be memoized per stage, 2 not (it reads handles or addresses from uniform buffer memory), 0 not known yet
 } vkshader_t;
 vkshader_t *vk_shader(uint64_t key, int stage);   // NULL when the bundle has no such shader
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd, uint64_t ri);   // the module, or its variant (integer views; extra outputs; fragment depth written; retyped vertex inputs)
@@ -158,7 +161,6 @@ VkBuffer vk_zero_buffer(void);
 // ---- replay (gfx_vk_exec.c) ----
 void vk_exec_reset(void);   // per submission
 void vk_end_pass(void);     // close an open render pass
-int vk_lower_left(void);    // NVN's lower-left window origin (the game kept NVN's default): the window image is stored bottom-up, flipped at present and in frame shots
 
 // ---- presentation (gfx_vk_present.c) ----
 void vk_present_init(void);

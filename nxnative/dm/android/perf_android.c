@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/syscall.h>
+#include <sched.h>
 #include "dm.h"
 
 typedef struct APerformanceHintManager APerformanceHintManager;
@@ -88,6 +89,22 @@ static void hint_threads_scan(int32_t self) {
     LOG("[perf] ADPF session threads:%s", l);
 }
 
+// DM_PIN_REPLAY (start-up): the replay thread (DM_NVN_ASYNC, hle_nvn.c replay_main) kept to the fastest cores. prime: the cores of the highest maximum clock
+// (a Snapdragon 8+ Gen 1's Cortex-X2), big: every core above the lowest maximum clock. Left to the scheduler, Unicorn Overlord's battle map replay took
+// 13 to 20 ms a frame from run to run with the same ~3,500 draws
+void dm_perf_replay_thread(void) {
+    const char *e = getenv("DM_PIN_REPLAY"); if (!e || !*e || !strcmp(e, "0")) return;
+    int prime = !strcmp(e, "prime"); long n = sysconf(_SC_NPROCESSORS_CONF); if (n > 32) n = 32;
+    long mhz[32] = {0}, hi = 0, lo = 0;
+    for (long c = 0; c < n; c++) { char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", c); FILE *f = fopen(p, "r");
+        if (f) { if (fscanf(f, "%ld", &mhz[c]) != 1) mhz[c] = 0; fclose(f); } mhz[c] /= 1000; if (mhz[c] > hi) hi = mhz[c]; if (mhz[c] && (!lo || mhz[c] < lo)) lo = mhz[c]; }
+    if (!hi || hi == lo) { LOG("[perf] DM_PIN_REPLAY: the cores' clocks are unknown or all alike, not pinned"); return; }
+    cpu_set_t set; CPU_ZERO(&set); char l[96]; size_t o = 0;
+    for (long c = 0; c < n; c++) if (prime ? mhz[c] == hi : mhz[c] > lo) { CPU_SET(c, &set); o += snprintf(l + o, sizeof l - o, " %ld", c); }
+    if (sched_setaffinity(0, sizeof set, &set)) { LOG("[perf] DM_PIN_REPLAY: sched_setaffinity refused"); return; }
+    LOG("[perf] replay thread on CPUs%s (%s, up to %ld MHz)", l, prime ? "prime" : "big", hi);
+}
+
 static int64_t g_work_start;
 // ---- adaptive frame rate: when the frames do not fit the period the game asks for, presentation steps to a longer one the display divides evenly
 // (60 → 40 → 30 fps; 40 asks the display for 120 Hz), and back when they fit the shorter one with room; a steady rate instead of alternating
@@ -125,9 +142,18 @@ void dm_perf_frame_cost(int64_t ns) { g_frame_cost = ns; }
 // still reaches its vsync. Viractal at 60 fps (FPSLocker's unlock) stepped down to 40 on p90 work of 17.5-17.7 ms while it dropped 0-10 of 300 frames on
 // screen at 60 with the rate held (DM_ADAPTIVE_FPS=0; work p50 6 ms, GPU 5-11 ms), and the player saw the counter fall into the 30s whenever the pieces moved
 static uint8_t g_late[64]; static int g_nshown; static unsigned g_held_back;
+// With display times (vk_refresh_ms) the intervals are whole vsyncs, and 1.5 periods sat on a vsync boundary at 60 fps on 120 Hz (25.0 ms against 25.0): the limit
+// moves a quarter refresh past it, so the same frames count as with the hand-over times before. A stricter period + half a refresh counted every one-vsync miss:
+// Unicorn Overlord's opening then showed 70-157 of 300 frames at 25 ms and stepped to 40 fps, where it had held 60 (about 50-54 fps on screen)
+__attribute__((weak)) double vk_refresh_ms(void) { return 0; }
+// A frame the game itself asked to hold longer (its present interval) is judged against that hold. Super Mario Bros. Wonder sets interval 2 for the frame after one
+// that ran long (its own controller, main+0xcfd24) and 1 again: 133 times in 50 s of its first level, and those 33.3 ms frames counted as late (29-36 of 64) stepped
+// the rate down to 40 fps, where the paced frames ran longer still in the game's own measure and it asked for interval 2 more often
+__attribute__((weak)) double dm_nvn_present_hold_ms(void) { return 0; }
 void dm_perf_present(double iv_ms) {
     if (iv_ms == 0) return;
-    g_late[g_nshown++ % 64] = iv_ms < 0 || iv_ms > STEPS[g_step] / 1e6 * 1.5;
+    double r = vk_refresh_ms(), hold = dm_nvn_present_hold_ms(), per = STEPS[g_step] / 1e6, lim = (hold > per ? hold : per) * 1.5 + r / 4;
+    g_late[g_nshown++ % 64] = iv_ms < 0 || iv_ms > lim;
 }
 static int shown_late(void) {   // of the last 64 frames on screen, how many missed the display; -1 without readings (a device that gives no present times)
     int n = g_nshown < 64 ? g_nshown : 64, m = 0; if (n < 32) return -1;
@@ -152,13 +178,19 @@ static void adapt_frame(int64_t work, int64_t now) {
     int nsteps = (int)(sizeof STEPS / sizeof *STEPS);
     if (g_step + 1 < nsteps && p90 > STEPS[g_step] * 105 / 100) {
         // only when the frames miss the display too: at least 1 in 10 of the last 64 on screen (as the 90th percentile), or no readings to tell
-        int late = shown_late(); if (late >= 0 && late < 7) { g_held_back++; return; }
-        // back down soon after a step up: the next try waits twice as long (up to a minute), so the rate does not swing between two steps
-        if (g_last_up && now - g_last_up < 10000000000ll) { g_up_hold = g_up_hold * 2 > 60000000000ll ? 60000000000ll : g_up_hold * 2; }
-        g_step++; g_last_change = now; g_nwork = 0; g_nshown = 0; g_ok_frames = 0; LOG("[perf] adaptive frame rate: %.0f fps (frames p90 %.1f ms, late on screen %d of 64)", 1e9 / STEPS[g_step], p90 / 1e6, late); return; }
+        int late = shown_late(); if (late >= 0 && late < 7) g_held_back++;   // veto only the downshift: the chosen upshift percentile may still fit
+        else {
+            // back down soon after a step up: the next try waits twice as long (up to a minute), so the rate does not swing between two steps
+            if (g_last_up && now - g_last_up < 10000000000ll) { g_up_hold = g_up_hold * 2 > 60000000000ll ? 60000000000ll : g_up_hold * 2; }
+            g_step++; g_last_change = now; g_nwork = 0; g_nshown = 0; g_ok_frames = 0; LOG("[perf] adaptive frame rate: %.0f fps (frames p90 %.1f ms, late on screen %d of 64)", 1e9 / STEPS[g_step], p90 / 1e6, late); return; }
+    }
     // Back up when the frames would fit the shorter period even at the clocks they get now: those clocks drop with the slack of the longer one (Viractal's board
     // took 14-16 ms a frame at 40 fps, p90 15.6, and 10-11 ms with 0 frames late at 60). A step up that does not fit shows on screen and steps back down (above)
-    if (g_step > 0 && p90 < STEPS[g_step - 1]) { if (++g_ok_frames > 120 && now - g_last_change >= g_up_hold) { g_step--; g_last_change = g_last_up = now; g_nwork = 0; g_nshown = 0; g_ok_frames = 0; LOG("[perf] adaptive frame rate: %.0f fps (frames p90 %.1f ms)", 1e9 / STEPS[g_step], p90 / 1e6); } }
+    // DM_ADAPT_UP_PCT (start-up, default 90): the percentile of frame work judged for a step up. At the longer period the clocks drop and the work grows:
+    // Unicorn Overlord's opening held 60 fps with 1-2 of 64 frames late, but once a load stepped it down to 40 its p90 stayed at 21-25 ms and it never went back
+    // up (p50 14-15 ms). With 50 it tries the shorter period again; a try that does not fit misses the display and steps back down, and the next waits twice as long
+    static int up_pct = -1; if (up_pct < 0) { const char *e = getenv("DM_ADAPT_UP_PCT"); up_pct = e && atoi(e) > 0 && atoi(e) < 100 ? atoi(e) : 90; }
+    if (g_step > 0 && (up_pct == 90 ? p90 : work_pct(up_pct)) < STEPS[g_step - 1]) { if (++g_ok_frames > 120 && now - g_last_change >= g_up_hold) { g_step--; g_last_change = g_last_up = now; g_nwork = 0; g_nshown = 0; g_ok_frames = 0; LOG("[perf] adaptive frame rate: %.0f fps (frames p90 %.1f ms)", 1e9 / STEPS[g_step], p90 / 1e6); } }
     else g_ok_frames = 0;
 }
 // hle_nvn.c, the first acquire after a present, right after its pacing wait. A frame's work is the time between two presents less that wait: what the

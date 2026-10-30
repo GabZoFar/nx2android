@@ -2,9 +2,9 @@
 lz4
 capstone
 pillow
-pyyaml
-# the shared-font stand-in with the controller-button icons (porter/fonts.py runs dm/tools/make_ext_font.py)
 fonttools
+pyyaml
 backports.zstd; python_version < "3.14"
+pycryptodome   # NSZ / XCZ dumps (porter.dumps: AES-CTR, with zstd)
 # the GUI (python -m gui); the CLI (python -m porter) runs without it
 PySide6
