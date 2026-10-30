@@ -781,6 +781,17 @@ static void prewarm_start(void) {
     VKLOG("prewarm: %zu recorded pipelines on %d threads", g_pw_n, nt);
     for (int i = 0; i < nt; i++) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, prewarm_thread, NULL); pthread_attr_destroy(&a); }
 }
+static uint32_t vfmt_kind(uint32_t f) {   // the numeric type a vertex format gives the shader: 1 uint, 2 int, 3 float (normalized, scaled and float formats)
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+    case VK_FORMAT_A2R10G10B10_UINT_PACK32: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32_UINT: case VK_FORMAT_R32G32B32A32_UINT: return 1;
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_SINT: case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+    case VK_FORMAT_A2R10G10B10_SINT_PACK32: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16_SINT: case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32A32_SINT: return 2;
+    default: return 3;
+    }
+}
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg[3]) {
     VkPipeline p;
     VkPipelineShaderStageCreateInfo ss[3]; uint32_t ns = 0;
@@ -789,7 +800,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     const vkshader_t *fs = stg[1] && !k->raster_discard ? stg[1] : NULL; uint32_t xo[3] = {0};
     if (stg[0]) xo[0] = (stg[2] ? stg[2]->in_locs : fs ? fs->in_locs : 0) & ~stg[0]->out_locs;
     if (stg[2]) xo[2] = (fs ? fs->in_locs : 0) & ~stg[2]->out_locs;
-    for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) : 0), "main", NULL};
+    for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) : 0, 0), "main", NULL};
     VkVertexInputAttributeDescription ad[16]; VkVertexInputBindingDescription bd[17]; VkVertexInputBindingDivisorDescriptionEXT dd[17]; uint32_t ndd = 0;
     for (uint32_t i = 0; i < k->nattr; i++) ad[i] = (VkVertexInputAttributeDescription){k->attr[i].loc, k->attr[i].binding, (VkFormat)k->attr[i].fmt, k->attr[i].off};
     for (uint32_t i = 0; i < k->nbind; i++) { bd[i] = (VkVertexInputBindingDescription){k->bind[i].binding, k->bind[i].stride, (VkVertexInputRate)k->bind[i].rate};
@@ -820,6 +831,13 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     if (!prp && !V.has_dynrender) return (VkPipeline)1;   // no compatible render pass and no dynamic rendering: no valid pipeline (pass_commit skips such passes)
     VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, prp ? NULL : &rci, 0, ns, ss, &vi, &ia, NULL, &vs, &rs, &ms, &ds, &cb, &dy, layout, prp, 0, VK_NULL_HANDLE, -1};
     VkResult r = vkCreateGraphicsPipelines(V.dev, V.pcache, 1, &ci, NULL, &p);
+    if (r && stg[0] && !k->alt) {   // refused: where a vertex input's numeric type differs from its format's (which MoltenVK refuses, Adreno does not), the inputs retyped (spv_retype_inputs)
+        uint64_t ri = 0;
+        for (uint32_t i = 0; i < k->nattr; i++) { uint32_t l = k->attr[i].loc, fk = vfmt_kind(k->attr[i].fmt); if (l < 32 && stg[0]->in_kind[l] && stg[0]->in_kind[l] != fk) ri |= (uint64_t)fk << 2 * l; }
+        VkShaderModule vm = ri ? vk_shader_module(stg[0], k->um[0], k->im[0], xo[0], 0, ri) : VK_NULL_HANDLE;
+        if (vm && vm != ss[0].module) { ss[0].module = vm; r = vkCreateGraphicsPipelines(V.dev, V.pcache, 1, &ci, NULL, &p);
+            static int said; if (!r && said++ < 16) VKLOG("vertex shader %016llx: inputs retyped to their formats' numeric types (%#llx, 2 bits per location: 1 uint 2 int 3 float)", (unsigned long long)k->key[0], (unsigned long long)ri); }
+    }
     static uint64_t n; uint64_t c = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
     if (r) { LOG("[RED] [vk] graphics pipeline failed (%d): shaders %016llx %016llx %016llx", r, (unsigned long long)k->key[0], (unsigned long long)k->key[1], (unsigned long long)k->key[2]); p = (VkPipeline)1; }
     else if (c % 200 == 0) VKLOG("%llu graphics pipelines", (unsigned long long)c);
@@ -1498,7 +1516,7 @@ static void dispatch(const p_dispatch *d) {
     uint64_t ck[3] = {cs->key, g_num_um, g_num_im};
     VkPipeline p = nvn_hm_get(&g_cpipes, ck);
     if (!p) {
-        VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, ck[1], ck[2], 0, 0), "main", NULL}, layout, VK_NULL_HANDLE, -1};
+        VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, ck[1], ck[2], 0, 0, 0), "main", NULL}, layout, VK_NULL_HANDLE, -1};
         if (vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p)) { LOG("[RED] [vk] compute pipeline failed: %016llx", (unsigned long long)cs->key); p = (VkPipeline)1; }
         nvn_hm_put(&g_cpipes, ck, p);
     }
@@ -1524,6 +1542,7 @@ static void copy_b2t(const p_copy_b2t *c, int to_texture) {
     vk_end_pass_land();
     vkimg_t *im = vk_tex(c->tex); const vkfmt_t *f = vk_fmt(c->tex->d.format);
     if (!im || !f) return;
+    if (f->abw) { VKRED_ONCE(73, "buffer ↔ texture copy of an ASTC texture decoded on the CPU (%ux%u): skipped", c->tex->d.width, c->tex->d.height); return; }   // its image holds RGBA8
     VkBuffer b; VkDeviceSize o;
     if (!vk_buf_at(c->src, 1, &b, &o)) { VKRED_ONCE(70, "buffer of a buffer ↔ texture copy outside the memory pools"); return; }
     VkCommandBuffer cb = vk_cmd(); vk_tex_prepare(cb, im); vk_img_barrier_all(cb);
