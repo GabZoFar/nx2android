@@ -16,6 +16,10 @@ PY = sys.executable
 # The letters of the button-icon font (make_ext_font.py knocks them out of the icons): a bold system font of the machine that ports, never shipped in the repository
 LETTER_FONTS = [f'{os.environ.get("WINDIR", "C:/Windows")}/Fonts/{f}' for f in ('ARLRDBD.TTF', 'arialbd.ttf')] + [
     '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf']
+# The stand-in for the standard shared font: a system font of the machine that ports with what Nintendo's covers (each has U+25A1: Arial in WGL4's geometric shapes,
+# Arial Unicode and DejaVu Sans the whole block), never shipped in the repository
+STANDARD_FONTS = [f'{os.environ.get("WINDIR", "C:/Windows")}/Fonts/arial.ttf', '/System/Library/Fonts/Supplemental/Arial Unicode.ttf', '/Library/Fonts/Arial Unicode.ttf',
+                  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/TTF/DejaVuSans.ttf', '/usr/share/fonts/dejavu/DejaVuSans.ttf']
 
 
 @dataclass
@@ -491,12 +495,13 @@ class Port:
 
     # ---- data: the files the app reads from its files folder ----
     def data(self):
-        PROG.stage('data pack', step='button-icon font')
+        PROG.stage('data pack', step='shared-font stand-ins')
         font_env, font_files = self.button_font()
+        std_env, std_files = self.standard_font()
         dst = self.o.out / f'{app_stem(self.g, self.app_name)}-data'
         man = datapack.build(dst, profile=self.ap, version=self.pkg_ver, display=self.display, patched=self.patched, romfs=self.game / 'RomFS', shaders=self.dmsv,
-                             aoc=self.aoc, language=self.lang, package=self.package, env=self.fps_env + font_env, files={**self.fps_files, **font_files},
-                             progress=lambda what: PROG.set(step=f'linking {what}'))
+                             aoc=self.aoc, language=self.lang, package=self.package, env=self.fps_env + font_env + std_env,
+                             files={**self.fps_files, **font_files, **std_files}, progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
 
@@ -516,6 +521,16 @@ class Port:
             nsp.run([PY, DM / 'tools/make_ext_font.py', ttf, letters], self.logs / 'make_ext_font.log', env=self.env)
             kf.write_text(f'{key}\n')
         return [f'DM_SHARED_FONT_EXT={datapack.files_folder(self.package)}/nintendo_ext.ttf'], {'nintendo_ext.ttf': ttf}
+
+    def standard_font(self):
+        """The stand-in for the system's standard shared font (hle_sdk16.c, DM_SHARED_FONT), copied from the porting machine. Without it the Android host falls back to the
+        device's Roboto, which has no U+25A1: Link's Awakening looks that glyph up as its stand-in for missing characters while laying out its first text, got null and
+        crashed (main+0x111e0d0). Returns (env.txt rows, pack files); none where the machine has no such font"""
+        src = next((Path(p) for p in STANDARD_FONTS if Path(p).is_file()), None)
+        if not src: say('[RED] no stand-in for the standard shared font on this computer: the app falls back to the device\'s Roboto, which lacks symbols some games need'); return [], {}
+        d = self.aw / 'font'; ttf = d / 'standard.ttf'
+        if not ttf.is_file() or ttf.stat().st_size != src.stat().st_size: d.mkdir(parents=True, exist_ok=True); shutil.copyfile(src, ttf)
+        return [f'DM_SHARED_FONT={datapack.files_folder(self.package)}/standard.ttf'], {'standard.ttf': ttf}
 
     # ---- install (optional) ----
     def install(self):
