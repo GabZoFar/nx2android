@@ -1,7 +1,7 @@
 # The nx2android desktop app: four tabs over porter.
 #   Port   pick the game folder (porter inspect), options, Port (porter port --progress json): the stage list, the current stage's bar, the log; then open or install the result
-#   Setup  the tools a port needs (porter doctor), downloading the missing ones (porter tools --download), and the saved settings (porter.config): prod.keys, the NDK,
-#          dotnet, adb, the output folder, the device
+#   Setup  the tools a port needs (porter doctor), downloading the missing ones (porter tools --download), and the saved settings (porter.config): the NDK, dotnet,
+#          adb, the output folder, the device
 #   Games  the game profiles (porter profiles --all)
 #   Saves  a ported game's save between the device and the PC (porter saves): the save folders on the device, a fresh export to a folder here, an import of a
 #          folder or .zip (a console's save, or an export)
@@ -55,7 +55,7 @@ class PortTab(QWidget):
         self.porter = Porter(self); self.porter.event.connect(self.on_event); self.porter.finished.connect(self.on_finished)
         v = QVBoxLayout(self)
 
-        self.folder = QLineEdit(); self.folder.setPlaceholderText('the folder with the game\'s NSP / XCI / NSZ / XCZ files (base game, update, DLC)')
+        self.folder = QLineEdit(); self.folder.setPlaceholderText('the folder of the game\'s extracted files: ExeFS and RomFS, extracted from your own Switch (an update\'s: with the update applied)')
         self.folder.editingFinished.connect(self.inspect)
         g = QGroupBox('Game'); gl = QVBoxLayout(g)
         gl.addWidget(path_row(self.folder, self.pick_folder))
@@ -139,15 +139,14 @@ class PortTab(QWidget):
     def on_inspect(self, info, code):
         err = info
         self.info = info = None if info and info.get('error') else info
-        if not info: self.card.setText('<span style="color:#c62828">' + ((err or {}).get('error') or 'No game found in this folder (an NSP, XCI, NSZ or XCZ with a title ID).') + '</span>'); return
+        if not info: self.card.setText('<span style="color:#c62828">' + ((err or {}).get('error') or 'No game found in this folder (its extracted ExeFS and RomFS).') + '</span>'); return
         a = info.get('android') or {}
         st = a.get('status', 'ios only' if info.get('profile') else 'not supported')
         col = STATUS_COLOUR.get(st, '#c62828')
         rows = [(f'<b>{info["name"]}</b> &nbsp; <span style="color:#757575">{info["title_id"]}</span>' if info.get('name') else f'<b>{info["title_id"]}</b>') + ' &nbsp; '
                 f'<span style="background:{col};color:white;padding:1px 6px">&nbsp;{st}&nbsp;</span>']
-        files = [f'base game' ] + [f'update {u["version"]}' for u in info['updates']] + ([f'{len(info["dlc"])} DLC'] if info['dlc'] else [])
+        files = [v['version'] for v in info['found']] + ([f'{len(info["dlc"])} DLC'] if info['dlc'] else [])
         rows.append('In the folder: ' + ', '.join(files) + (f' — packs <b>{info["pack"]}</b>' if info.get('pack') else ''))
-        if info.get('compressed'): rows.append(f'<span style="color:#757575">NSZ / XCZ ({len(info["compressed"])}): decompressed during the port into a temporary folder, deleted once extracted</span>')
         if a.get('tested'): rows.append(f'Tested: {a["tested"]}')
         if info.get('reason'): rows.append(f'<span style="color:{"#ef6c00" if info["supported"] else "#c62828"}">{info["reason"]}</span>')
         self.card.setText('<br>'.join(rows))
@@ -172,9 +171,6 @@ class PortTab(QWidget):
 
     # ---- the port ----
     def start(self):
-        cfg = config.load()
-        if not cfg.get('keys'):
-            QMessageBox.warning(self, 'prod.keys', 'Set the path of your prod.keys on the Setup tab first.'); self.win.tabs.setCurrentIndex(1); return
         args = ['port', self.folder.text().strip(), '--progress', 'json']
         if self.app_name.text().strip(): args += ['--app-name', self.app_name.text().strip()]
         if self.language.currentData(): args += ['--language', self.language.currentData()]
@@ -267,7 +263,7 @@ class PortTab(QWidget):
 
 # ---------------- Setup ----------------
 class SetupTab(QWidget):
-    FIELDS = [('keys', 'prod.keys', 'file'), ('ndk', 'Android NDK folder', 'dir'), ('dotnet', 'dotnet', 'file'), ('adb', 'adb', 'file'),
+    FIELDS = [('ndk', 'Android NDK folder', 'dir'), ('dotnet', 'dotnet', 'file'), ('adb', 'adb', 'file'),
               ('out', 'Default output folder', 'dir'), ('device', 'Device (adb serial)', 'text')]
 
     def __init__(self, win):
@@ -281,7 +277,7 @@ class SetupTab(QWidget):
         gl.addWidget(self.table)
         note = QLabel('A port needs the <b>Android NDK r27c</b>, the <b>.NET SDK 10</b> and, to install from here, Android <b>platform-tools</b>. '
                       '<b>Download missing tools</b> fetches them from Google and Microsoft (about 1 GB) into your nx2android folder; or install them yourself and set their paths below. '
-                      'Your <b>prod.keys</b> must come from your own Switch. Keys and game files never leave your computer except to your own device.')
+                      'The game\'s files are yours, extracted from your own Switch with your own tools; they never leave your computer except to your own device.')
         note.setWordWrap(True); note.setTextFormat(Qt.RichText); gl.addWidget(note)
         dl = QHBoxLayout(); self.dl_btn = QPushButton('Download missing tools'); self.dl_btn.clicked.connect(self.download)
         self.dl_step = QLabel(''); self.dl_prog = QProgressBar(); self.dl_prog.setRange(0, 1000); self.dl_prog.setVisible(False)

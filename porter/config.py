@@ -1,11 +1,10 @@
-# The player's settings, kept in <user dir>/config.json: toolchain paths, prod.keys, the output folder, the device. The GUI's setup screen and `porter config` write them;
+# The player's settings, kept in <user dir>/config.json: toolchain paths, the output folder, the device, the game language. The GUI's setup screen and `porter config` write them;
 # command-line options win over them.
 import json
 
 from porter.paths import user_dir
 
 KEYS = {
-    'keys': 'path of prod.keys',
     'ndk': 'Android NDK folder (r27c)',
     'dotnet': 'dotnet executable (.NET SDK 10)',
     'adb': 'adb executable (platform-tools)',

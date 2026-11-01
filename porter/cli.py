@@ -6,13 +6,11 @@ from pathlib import Path
 def _parser():
     ap = argparse.ArgumentParser(prog='porter', description='Port your own Switch game files to an Android app (docs/ARCHITECTURE.md).')
     sub = ap.add_subparsers(dest='cmd', required=True)
-    d = sub.add_parser('doctor', help='check the tools a port needs'); d.add_argument('--json', action='store_true'); d.add_argument('-k', '--keys')
+    d = sub.add_parser('doctor', help='check the tools a port needs'); d.add_argument('--json', action='store_true')
     p = sub.add_parser('profiles', help='list the games the tool can port'); p.add_argument('--all', action='store_true', help='also the iOS profiles not ported to Android'); p.add_argument('--json', action='store_true')
     i = sub.add_parser('inspect', help='what a game folder holds and whether it can be ported'); i.add_argument('folder'); i.add_argument('--json', action='store_true')
-    i.add_argument('-k', '--keys', help='prod.keys (default: the configured one): reads the title ID of a dump with no [title ID] in its name')
     po = sub.add_parser('port', help='make the APK and the data pack (and install them)')
-    po.add_argument('folder', help='the game\'s folder: its base game NSP / XCI / NSZ / XCZ, updates and DLC')
-    po.add_argument('-k', '--keys', help='prod.keys (default: the configured one)')
+    po.add_argument('folder', help='the folder of the game\'s extracted files: ExeFS/ and RomFS/ (an update\'s: with the update applied), or one such folder per version; DLC in aoc/')
     po.add_argument('-o', '--out', help='folder for the APK and the data pack (default: the game folder)')
     po.add_argument('-p', '--version', default='', help='version to pack, v<N> (default: the newest in the folder)')
     po.add_argument('-l', '--language', default='', help='game language, a code or a name (default: English)')
@@ -64,7 +62,7 @@ def _print_json(obj): print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 def cmd_doctor(a):
     from porter import toolchain
-    rows = toolchain.checks(keys=a.keys)
+    rows = toolchain.checks()
     if a.json: _print_json([r.as_dict() for r in rows])
     else:
         for r in rows: print(f'{"ok " if r.ok else ("!! " if r.required else "-- ")} {r.name:15} {r.detail}' + (f'\n{"":19}→ {r.fix}' if r.fix and not r.ok else ''))
@@ -82,15 +80,15 @@ def cmd_profiles(a):
 def cmd_inspect(a):
     from porter import pipeline
     from porter.upstream import BuildError
-    try: info = pipeline.inspect(a.folder, a.keys)
+    try: info = pipeline.inspect(a.folder)
     except BuildError as e:
         if a.json: _print_json({'error': str(e)})
         else: print(e, file=sys.stderr)
         return 2
     if a.json: _print_json(info); return 0 if info['supported'] else 2
-    print(f'{info["title_id"]}  {info.get("name", "")}\n  base: {info["base"]}')
-    for u in info['updates']: print(f'  update {u["version"]}: {u["file"]}')
-    for d in info['dlc']: print(f'  DLC {d["title_id"]}: {d["file"]}')
+    print(f'{info["title_id"]}  {info.get("name", "")}')
+    for v in info['found']: print(f'  {v["version"]}: {v["folder"]}')
+    if info['dlc']: print(f'  DLC: {", ".join(info["dlc"])}')
     if info.get('pack'): print(f'  packs {info["pack"]} (versions in the folder: {", ".join(info["versions"])})')
     if info['android']: print(f'  Android: {info["android"]["status"]}' + (f', tested on {info["android"]["tested"]}' if info['android']['tested'] else ''))
     if info['reason']: print(f'  {info["reason"]}')
@@ -125,7 +123,7 @@ def cmd_port(a):
         env = os.environ.get('NX2A_VERCODE_OFFSET', '').strip() or '0'
         try: offset = int(env)
         except ValueError: print(f'NX2A_VERCODE_OFFSET is not a number: {env}', file=sys.stderr); return 2
-    opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
+    opts = pipeline.Options(folder=Path(a.folder), out=Path(a.out) if a.out else None, version=a.version, language=a.language,
                             app_name=a.app_name, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch,
                             vercode_offset=offset, alias_headroom=a.alias_headroom, jobs=a.jobs)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))

@@ -166,7 +166,7 @@ class Experimental(unittest.TestCase):
         ios_only = '010028600EBDA000'   # Super Mario 3D World + Bowser's Fury: an iOS profile without android.tsv or patches.py
         t = Path(tempfile.mkdtemp(prefix='nx2a_test_exp_')); environ = dict(os.environ)
         try:
-            port = pipeline.Port(pipeline.Options(folder=t, experimental=True)); port.env = {}; port.work = t / f'{ios_only}_build'; port.o.keys = None
+            port = pipeline.Port(pipeline.Options(folder=t, experimental=True)); port.env = {}; port.work = t / f'{ios_only}_build'
             g, ap = port.experimental_profile(game.load(ios_only), ios_only)
             self.assertEqual(g.dir, (t / f'{ios_only}_build/profile/{ios_only}').resolve())
             self.assertEqual((ap.status, ap.package), ('experimental', f'org.nx2a.t{ios_only.lower()}'))
@@ -267,115 +267,71 @@ class Misc(unittest.TestCase):
     def test_app_stem(self):
         self.assertEqual(pipeline.app_stem(game.load(NEO), 'NEO'), 'NeoTheWorldEndsWithYou')
 
-    def test_disk_space(self):   # twice the game files, less what the build folder holds, plus 1 GB
+    def test_disk_space(self):   # 3 GB for the build folder beside the game files, which are read where they are (the data pack links their RomFS on the same drive)
         from types import SimpleNamespace as NS
-        d = Path(tempfile.mkdtemp(prefix='nx2a_test_game_')); (d / 'g.nsp').write_bytes(b'\0' * 2**20); work = d / 'build'
-        p = NS(o=NS(folder=d), work=work); real = shutil.disk_usage
+        d = Path(tempfile.mkdtemp(prefix='nx2a_test_game_')); extracted_version(d / 'v0', 0x0100000000BBB000)
+        p = NS(o=NS(folder=d, out=d), have={'v0': d / 'v0'}, pkg_ver='v0'); real = shutil.disk_usage
         try:
-            shutil.disk_usage = lambda _: NS(free=2**30 + 2**20)
+            shutil.disk_usage = lambda _: NS(free=2 * 2**30)
             with self.assertRaises(pipeline.BuildError): pipeline.Port.check_space(p)
-            work.mkdir(); (work / 'x').write_bytes(b'\0' * 2**20); pipeline.Port.check_space(p)   # a build folder already there counts
-        finally: shutil.disk_usage = real
+            shutil.disk_usage = lambda _: NS(free=3 * 2**30); pipeline.Port.check_space(p)
+        finally: shutil.disk_usage = real; shutil.rmtree(d, ignore_errors=True)
 
 
-def _hfs0(files):   # an HFS0 of (name, data): the XCI's partitions (hash fields left zero: nothing here reads them)
-    strs = b''.join(n.encode() + b'\0' for n, _ in files); ent, off = b'', 0
-    for i, (n, d) in enumerate(files):
-        ent += struct.pack('<QQII8x32s', off, len(d), sum(len(m.encode()) + 1 for m, _ in files[:i]), 0, b''); off += len(d)
-    return struct.pack('<4sII4x', b'HFS0', len(files), len(strs)) + ent + strs + b''.join(d for _, d in files)
+def npdm(tid):   # a main.npdm: META, its ACI0 at 0x80 with the program ID at +0x10
+    b = bytearray(0x100); b[:4] = b'META'; struct.pack_into('<I', b, 0x70, 0x80); b[0x80:0x84] = b'ACI0'; struct.pack_into('<Q', b, 0x90, tid)
+    return bytes(b)
 
 
-@unittest.skipUnless(importlib.util.find_spec('Crypto'), 'no pycryptodome')
-class Dumps(unittest.TestCase):   # porter/dumps.py: NSZ / XCZ → NSP; an NCZ made here as nsz makes it, from an NCA of a plain section and an AES-CTR one
-    def setUp(self):
-        from Crypto.Cipher import AES
-        from porter import dumps; self.dumps = dumps
-        rnd = random.Random(7); b = lambda n: bytes(rnd.getrandbits(8) for _ in range(n))
-        self.key, self.ctr = b(16), b(8) + b'\0' * 8
-        head, plain = b(0x4000), b(0x2000) + bytes(0x18000)   # the CTR part compresses (zeros), so zstd has something to do
-        self.nca = head + plain[:0x2000] + AES.new(self.key, AES.MODE_CTR, nonce=self.ctr[:8], initial_value=0x6000 >> 4).encrypt(plain[0x2000:])
-        self.name = hashlib.sha256(self.nca).hexdigest()[:32]
-        secs = struct.pack('<8sQ', b'NCZSECTN', 2) + struct.pack('<QQQQ16s16s', 0x4000, 0x2000, 1, 0, bytes(16), bytes(16)) + struct.pack('<QQQQ16s16s', 0x6000, 0x18000, 3, 0, self.key, self.ctr)
-        z = dumps.zstd_mod()
-        self.solid = head + secs + z.compress(plain)
-        bs = 1 << 14; blocks = [plain[i:i + bs] for i in range(0, len(plain), bs)]
-        comp = [z.compress(k) if i else k for i, k in enumerate(blocks)]   # the first block stored as it is (random data: compressing does not shrink it)
-        self.block = head + secs + struct.pack('<8sBBBBIQ', b'NCZBLOCK', 2, 1, 0, 14, len(blocks), len(plain)) + struct.pack(f'<{len(blocks)}I', *map(len, comp)) + b''.join(comp)
-        self.d = Path(tempfile.mkdtemp(prefix='nx2a_test_dumps_'))
-
-    def nsz(self, ncz, name='g.nsz'):
-        files = [(self.name + '.ncz', ncz), ('0100000000aaa0000000000000000000.tik', b't' * 0x2c0)]
-        hdr = self.dumps._pfs0_header([n for n, _ in files], [len(d) for _, d in files])
-        (self.d / name).write_bytes(hdr + b''.join(d for _, d in files)); return self.d / name
-
-    def check(self, src):
-        self.assertEqual(self.dumps.size(src), len(self.dumps._pfs0_header([self.name + '.nca', 'x' * 36], [0, 0])) + len(self.nca) + 0x2c0)
-        out = self.dumps.decompress(src, self.d / self.dumps.unpacked_name(src))
-        self.assertEqual(out.stat().st_size, self.dumps.size(src)); self.assertEqual(out.stat().st_mtime_ns, src.stat().st_mtime_ns)
-        with open(out, 'rb') as f: got = {n: (f.seek(o), f.read(s))[1] for n, o, s in self.dumps.entries(out)}
-        self.assertEqual(got[self.name + '.nca'], self.nca); self.assertEqual(len(got), 2)
-
-    def test_solid_and_block(self):
-        self.check(self.nsz(self.solid)); self.check(self.nsz(self.block, 'b.nsz'))
-
-    def test_first_section_in_the_header(self):   # nsz 5.0 starts the first section at 0xc00, inside the header it keeps as it is (a DLC NSZ it made, 2026-10-29)
-        s = bytearray(self.solid); s[0x4000 + 16:0x4000 + 32] = struct.pack('<QQ', 0xc00, 0x2000 + 0x4000 - 0xc00)
-        self.check(self.nsz(bytes(s)))
-
-    def test_xcz_is_its_secure_partition(self):
-        secure = _hfs0([(self.name + '.ncz', self.block), ('0100000000aaa0000000000000000000.tik', b't' * 0x2c0)])
-        root = _hfs0([('update', _hfs0([])), ('secure', secure)])
-        x = bytearray(0x200); x[0x100:0x104] = b'HEAD'; x[0x130:0x138] = struct.pack('<Q', 0x200)
-        (self.d / 'g.xcz').write_bytes(bytes(x) + root); self.check(self.d / 'g.xcz')
-
-    def test_damage_is_found(self):   # a changed byte: a zstd error, or an NCA whose SHA-256 is not its name; either way a BuildError and no NSP
-        for ncz, at in ((self.solid, 0x4000 + 16 + 0x80 + 40), (self.block, -1), (self.block, 0x4000 + 16 + 0x80 + 24 + 100)):
-            bad = bytearray(ncz); bad[at] ^= 1
-            with self.assertRaises(pipeline.BuildError): self.dumps.decompress(self.nsz(bytes(bad)), self.d / 'out.nsp')
-            self.assertFalse((self.d / 'out.nsp').exists())
-
-    def test_scan_takes_compressed_dumps(self):   # upstream's scan_nsps with porter's kinds: the NSZ's ticket names its title ID
-        self.nsz(self.solid, 'Game [v0].nsz')
-        app, fam = pipeline.nsp.scan_nsps(self.d, self.dumps.EXTS)
-        self.assertEqual(app, 0x0100000000AAA000); self.assertEqual(fam['base'].suffix, '.nsz')
+def extracted_version(d, tid, bid='11' * 16):   # one version's extracted files: ExeFS (main's build ID at 0x40, main.npdm) and RomFS
+    (d / 'ExeFS').mkdir(parents=True); (d / 'RomFS').mkdir()
+    (d / 'ExeFS/main').write_bytes(b'NSO0' + bytes(0x3c) + bytes.fromhex(bid) + bytes(0x10)); (d / 'ExeFS/main.npdm').write_bytes(npdm(tid))
+    (d / 'RomFS/data.bin').write_bytes(b'x')
+    return d
 
 
-@unittest.skipUnless(importlib.util.find_spec('Crypto'), 'no pycryptodome')
-class UntaggedXci(unittest.TestCase):   # issue #28: a cartridge dump named by its release ("hr-bdlwa.xci") has no ticket and no [title ID]: the content meta NCA's header names it
-    BASE = 0x01009D901BC56000
+class ExtractedFiles(unittest.TestCase):   # upstream's scan_extracted, extracted_versions, extracted_aoc: the game's files as the player extracted them (no dumps, no keys)
+    TID = 0x0100000000BBB000   # no profile has it
 
-    def setUp(self):
-        rnd = random.Random(28); self.hk = bytes(rnd.getrandbits(8) for _ in range(32))
-        self.d = Path(tempfile.mkdtemp(prefix='nx2a_test_xci_'))
-        self.keys = self.d / 'prod.keys'; self.keys.write_text(f'header_key = {self.hk.hex()}\n')
+    def setUp(self): self.d = Path(tempfile.mkdtemp(prefix='nx2a_test_extracted_'))
+    def tearDown(self): shutil.rmtree(self.d, ignore_errors=True)
 
-    def nca(self, tid, ctype):   # an NCA header (0xc00 bytes) whose second sector is encrypted as Nintendo does: AES-XTS, the sector number big-endian as the tweak
-        from Crypto.Cipher import AES
-        p = bytearray(0x200); p[:4] = b'NCA3'; p[5] = ctype; struct.pack_into('<Q', p, 0x10, tid)
-        data, t = AES.new(self.hk[:16], AES.MODE_ECB), int.from_bytes(AES.new(self.hk[16:], AES.MODE_ECB).encrypt((1).to_bytes(16, 'big')), 'little')
-        c = b''
-        for i in range(0, 0x200, 16):
-            tb = t.to_bytes(16, 'little'); c += bytes(a ^ b for a, b in zip(data.encrypt(bytes(a ^ b for a, b in zip(p[i:i + 16], tb))), tb))
-            t = (t << 1 & (1 << 128) - 1) ^ (0x87 if t >> 127 else 0)
-        return bytes(0x200) + c + bytes(0x800)
+    def test_one_version_is_the_folder(self):   # the title ID from main.npdm
+        extracted_version(self.d, self.TID)
+        self.assertEqual(pipeline.nsp.scan_extracted(self.d), (self.TID, [self.d], None))
 
-    def xci(self, name, ncas, key_area=False):
-        root = _hfs0([('update', _hfs0([])), ('secure', _hfs0(ncas))])
-        x = bytearray(0x200); x[0x100:0x104] = b'HEAD'; x[0x130:0x138] = struct.pack('<Q', 0x200)
-        (self.d / name).write_bytes(bytes(0x1000 if key_area else 0) + bytes(x) + root)
+    def test_versions_by_tag_or_build(self):   # a [v<N>] in the name, else the profile's build row the modules have; neither: v0, said in red
+        from types import SimpleNamespace as NS
+        a, b, c = (extracted_version(self.d / n, self.TID, bid) for n, bid in (('base', '11' * 16), ('update', '22' * 16), ('Game [v131072]', '33' * 16)))
+        g = NS(builds=lambda: {'v0': {'display': '1.0.0', 'main': '11' * 16}, 'v65536': {'display': '1.1.0', 'main': '22' * 16}})
+        app, dirs, aoc = pipeline.nsp.scan_extracted(self.d)
+        self.assertEqual((app, aoc), (self.TID, None))
+        self.assertEqual(pipeline.nsp.extracted_versions(dirs, g), {'v0': a, 'v65536': b, 'v131072': c})
+        notes = []
+        self.assertEqual(pipeline.nsp.extracted_versions([b], None, note=notes.append), {'v0': b}); self.assertIn('[v<N>]', notes[0])
+        with self.assertRaisesRegex(pipeline.BuildError, 'two folders of v0'): pipeline.nsp.extracted_versions([a, b], None, note=notes.append)
 
-    def test_scan_reads_the_meta_nca(self):   # an update's program NCA carries the base game's title ID: only the meta NCA's counts, and the smallest of them is the base game
-        self.xci('hr-bdlwa.xci', [('a.nca', self.nca(self.BASE + 0x800, 0)), ('b.cnmt.nca', self.nca(self.BASE + 0x800, 1)), ('c.nca', self.nca(self.BASE, 0)), ('d.cnmt.nca', self.nca(self.BASE, 1))])
-        app, fam = pipeline.nsp.scan_nsps(self.d, ('nsp', 'xci'), self.keys)
-        self.assertEqual(app, self.BASE); self.assertEqual(fam['base'].name, 'hr-bdlwa.xci')
-        self.xci('hr-bdlwa.xci', [('c.nca', self.nca(self.BASE + 0x800, 0)), ('d.cnmt.nca', self.nca(self.BASE + 0x800, 1))], key_area=True)
-        self.assertEqual(pipeline.nsp.title_of(self.d / 'hr-bdlwa.xci', self.hk), self.BASE + 0x800)
+    def test_dumps_and_two_games_are_refused(self):
+        (self.d / 'Game [0100000000BBB000][v0].nsp').write_bytes(bytes(64))
+        with self.assertRaisesRegex(pipeline.BuildError, 'no extracted game files'): pipeline.nsp.scan_extracted(self.d)
+        extracted_version(self.d / 'a', self.TID); extracted_version(self.d / 'b', self.TID + 0x2000)
+        with self.assertRaisesRegex(pipeline.BuildError, 'more than one game'): pipeline.nsp.scan_extracted(self.d)
 
-    def test_without_keys_the_error_says_how(self):
-        self.xci('hr-bdlwa.xci', [('d.cnmt.nca', self.nca(self.BASE, 1))])
-        with self.assertRaisesRegex(pipeline.BuildError, r'hr-bdlwa\.xci: no ticket .*no prod\.keys.*\[01009D901BC56000\]\[v0\]'): pipeline.nsp.scan_nsps(self.d, ('nsp', 'xci'))
-        self.keys.write_text(f'header_key = {bytes(32).hex()}\n')   # another key: the header does not decrypt to NCA3
-        with self.assertRaisesRegex(pipeline.BuildError, 'no content meta NCA'): pipeline.nsp.scan_nsps(self.d, ('nsp', 'xci'), self.keys)
+    def test_dlc_by_index_or_title_id(self):   # aoc/<index> as it is; aoc/<DLC title ID> linked into <work>/aoc/<index>
+        extracted_version(self.d, self.TID); aoc = self.d / 'aoc'; (aoc / '1').mkdir(parents=True); (aoc / '1/x.bin').write_bytes(b'1')
+        app, _, src = pipeline.nsp.scan_extracted(self.d); work = self.d / 'build'
+        self.assertEqual(pipeline.nsp.extracted_aoc(src, app, work), aoc)
+        (aoc / f'{self.TID + 0x1002:016X}').mkdir(); (aoc / f'{self.TID + 0x1002:016X}/y.bin').write_bytes(b'2')
+        out = pipeline.nsp.extracted_aoc(src, app, work)
+        self.assertEqual((out, (out / '1/x.bin').read_bytes(), (out / '2/y.bin').read_bytes()), (work / 'aoc', b'1', b'2'))
+        (aoc / 'extra').mkdir()
+        with self.assertRaisesRegex(pipeline.BuildError, 'by its index or its title ID'): pipeline.nsp.extracted_aoc(src, app, work)
+
+    def test_inspect(self):   # the GUI's game card: the versions found and the DLC; no profile: an experimental port can try it
+        extracted_version(self.d / 'Game [v65536]', self.TID); (self.d / 'aoc/1').mkdir(parents=True)
+        info = pipeline.inspect(self.d)
+        self.assertEqual((info['title_id'], [v['version'] for v in info['found']], info['dlc'], info['supported'], info['experimental']),
+                         (f'{self.TID:016X}', ['v65536'], ['1'], False, True))
 
 
 class FpsLocker(unittest.TestCase):   # porter/fpslocker.py: FPSLocker-Warehouse configs → the host's rows (hle_fpslock.c DM_FPS_LOCKS) and the rewriter's cuts

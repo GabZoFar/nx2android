@@ -32,28 +32,21 @@ class XcodePipelineTests(unittest.TestCase):
     def prepare_fixture(self, graphics, derived):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             root = Path(temporary).resolve()
-            (root / 'prod.keys').touch()
-            base = root / 'base.nsp'
-            update = root / 'update.nsp'
-            base.touch()
-            update.touch()
             registered = game.load('0100A6301214E000')
             profile = SimpleNamespace(id=registered.id, dir=root / 'profile' / registered.id,
                                       get=registered.get, words=registered.words,
                                       builds=lambda: {'v0': {'display': '1.0.0', 'main': 'other-build'}})
             sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'ue_decode', 'oodle_packs', 'ue_legacy')}
             sources['graphics'] = (graphics, 'fixture')
-            fam = {'base': base, 'updates': [] if derived else [(327680, update)], 'dlc': []}
             version = 'v0' if derived else 'v327680'
             extraction = root / 'extracted' / version
             (extraction / 'RomFS').mkdir(parents=True)
             (extraction / 'ExeFS').mkdir()
             mocks = {}
             for name, value in {
-                'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None,
-                'free_gb': 10000, 'build_nx_extract': root / 'nx_extract',
-                'extract': extraction, 'can_clone': False, 'build_mismatch': [],
-                'extract_aoc': None, 'rewrite': None, 'split_shaders': 'fixture-key',
+                'scan_extracted': (int(registered.id, 16), [extraction], None), 'extracted_versions': {version: extraction},
+                'check_prereqs': None, 'free_gb': 10000, 'check_romfs': None, 'build_mismatch': [],
+                'extracted_aoc': None, 'rewrite': None, 'split_shaders': 'fixture-key',
                 'build_shaders': root / 'shaders', 'build_vk_shaders': root / 'shaders',
                 'build_gl_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
                 'refine_after_rewrite': profile, 'derive_profile': '1.0.0', 'run': None,
@@ -74,7 +67,7 @@ class XcodePipelineTests(unittest.TestCase):
             output = io.StringIO()
             try:
                 with redirect_stdout(output):
-                    code = build.cli([str(root), '-k', str(root / 'prod.keys'), '--prepare-xcode',
+                    code = build.cli([str(root), '--prepare-xcode',
                                       '--language', 'ja', '--no-show-fps', '--progress', 'json'])
             finally:
                 progress.close()

@@ -106,9 +106,9 @@ check('every GUI action is a CLI subcommand', gui_calls <= subs, f'GUI uses {sor
 
 # 7. Stages: the documented ones are the pipeline's, in order
 pipe = (R / 'porter/pipeline.py').read_text(encoding='utf-8')
-for st in ('inputs', 'extract', 'rewrite', 'shaders', 'host', 'apk', 'data', 'install'):
+for st in ('inputs', 'use_files', 'rewrite', 'shaders', 'host', 'apk', 'data', 'install'):
     if not re.search(rf'def {st}\(self', pipe): check(f'stage {st} in pipeline.py', False)
-check('all documented stages exist in pipeline.py', all(re.search(rf'def {st}\(self', pipe) for st in ('inputs', 'extract', 'rewrite', 'shaders', 'host', 'apk', 'data', 'install')))
+check('all documented stages exist in pipeline.py', all(re.search(rf'def {st}\(self', pipe) for st in ('inputs', 'use_files', 'rewrite', 'shaders', 'host', 'apk', 'data', 'install')))
 check('host stage: --release unless --debug', "['--release']" in pipe and 'host-debug' in pipe)
 check('porter imports upstream build_ipa_from_nsp (not a copy)', any('build_ipa_from_nsp' in (R / f).read_text(encoding='utf-8') for f in porter)
       and not any(Path(f).name == 'build_ipa_from_nsp.py' for f in files if not f.startswith('nxnative/')))
@@ -117,7 +117,7 @@ check('porter imports upstream build_ipa_from_nsp (not a copy)', any('build_ipa_
 ship = [f for f in files if re.search(r'(^|/)(android-ndk|platform-tools|dotnet)(/|$)', f) or f.startswith('tools/')]
 check('no toolchain committed', not ship, ', '.join(ship[:5]))
 tc = (R / 'porter/toolchain.py').read_text(encoding='utf-8')
-check('doctor checks NDK, .NET, adb, keys', all(w in tc for w in ('ndk', 'dotnet', 'adb', 'keys')))
+check('doctor checks NDK, .NET, adb', all(w in tc for w in ('ndk', 'dotnet', 'adb')))
 
 # 9. Keys and game files never in the repository
 leak = [f for f in files if re.search(r'\.(nsp|nsz|xci|nca|keys)$|prod\.keys|title\.keys|signing-key', f, re.I)]
