@@ -50,9 +50,9 @@ typedef struct {
     VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; uint32_t qf;
     VkPhysicalDeviceProperties props; VkPhysicalDeviceMemoryProperties mem;
     VkPipelineCache pcache;
-    int has_bc, has_astc, has_gs, has_depth_clip_ctl, has_custom_border, has_robust2, has_xfb, has_imageless, has_dtiming, has_dynrender;
-    int astc_cpu;   // ASTC textures are decoded on the CPU into RGBA8 images (gfx_vk_astc.c): the device has no ASTC, or reads it back wrong (vk_init)
-    int has_timeline, has_rp2;   // the device gives vkWaitSemaphores, vkCreateRenderPass2 (by either name; vk_init asks the device itself)
+    int has_bc, has_astc, has_gs, has_depth_clip_ctl, has_custom_border, has_robust2, has_xfb, has_imageless, has_dtiming, has_dynrender, has_timeline;
+    int astc_cpu;   // ASTC textures are decoded on the CPU into RGBA8 images (vkfmt_t dec 12 / 13, gfx_vk_astc.c): the device has no ASTC, or reads it back wrong (vk_init)
+    int has_rp2;    // the device gives vkCreateRenderPass2 (by either name; vk_init asks the device itself, as for has_timeline's vkWaitSemaphores)
     float max_aniso;
 } vkdev_t;
 extern vkdev_t V;
@@ -84,10 +84,12 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l);    // from this submissio
 uint64_t vk_fence_done(void);   // the highest submission fence the GPU has completed
 
 // ---- formats and textures (gfx_vk_tex.c) ----
-typedef struct { VkFormat vk; VkComponentMapping swz; uint8_t kind; uint8_t depth, stencil, compressed, is_int, is_sint, bw, bh, bpb, abw, abh; } vkfmt_t;   // abw x abh: an ASTC
-                                                                                                                                                   // block size decoded on the CPU (V.astc_cpu)
+// dec: a BC format the device lacks (1 to 11: gfx_vk_tex.c bc_decode) or ASTC (12 UNORM, 13 sRGB: V.astc_cpu, vk_astc_decode), decoded on the CPU into vk,
+// dbpp bytes a texel; bw, bh and bpb stay the guest's blocks
+typedef struct { VkFormat vk; VkComponentMapping swz; uint8_t kind; uint8_t depth, stencil, compressed, is_int, is_sint, bw, bh, bpb, dec, dbpp; } vkfmt_t;
 void vk_astc_decode(const uint8_t *blocks, unsigned bw, unsigned bh, unsigned w, unsigned h, unsigned depth, int srgb, uint8_t *rgba, size_t pitch);   // gfx_vk_astc.c
 const vkfmt_t *vk_fmt(int nvn_format);   // NULL when the format has no Vulkan counterpart on this device
+void vk_bc_decode(const vkfmt_t *f, const uint8_t *src, size_t pitch, uint32_t w, uint32_t h, uint32_t z, uint8_t *dst);   // (f->dec) gfx_vk_tex.c bc_decode
 typedef struct vkimg vkimg_t;
 struct vkimg {
     VkImageUsageFlags usage; VkImageCreateFlags cflags;   // as created (an imageless framebuffer names them)
@@ -98,6 +100,7 @@ struct vkimg {
     uint64_t pkg_stamp; const void *pkg_span; uint64_t pkg_seen;
     const uint8_t *pkg_mem; size_t pkg_len; uint64_t pkg_used; int pkg_released;   // its storage, the present it was last drawn at, protection given up (vk_tex_sweep)
     uint64_t used;                  // the present it was last looked up at (vk_tex: evict_overlaps)
+    uint64_t rt_last, rt_frames;     // as an attachment: 1 + the present it was last drawn in, and in how many presents in a row up to it (gfx_vk_exec.c async_pipe)
     uint64_t fdz_frame;             // depth images: 1 + the present at which a fragment shader that replaces depth last wrote it (gfx_vk_exec.c fdz)
     int gpu_w;                      // the GPU wrote it: an attachment, a storage image, a copy or clear destination (gfx_vk_exec.c); lin_copy keeps that until the CPU writes its storage
     uint64_t lin_stamp; const void *lin_span; const uint8_t *lin_mem; size_t lin_len;   // lin_copy: the storage watched since the GPU wrote it
