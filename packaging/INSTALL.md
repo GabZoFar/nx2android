@@ -4,7 +4,7 @@ nx2android ports your own Nintendo Switch games to Android. This folder is the w
 
 - a Windows PC, or a Mac with Apple silicon (M1 or later), with about 30 GB free (the tools take 4 GB, a port about twice the game's size);
 - an Android device whose GPU is an **Adreno** (Snapdragon) or **Xclipse** (Exynos 2200 and later). Mali and PowerVR GPUs cannot run these games;
-- the game's files dumped from your own Switch (the base game NSP or XCI, its update and DLC, in one folder) and your **`prod.keys`** from the same Switch. The tool reads NSP and XCI files, and NSZ and XCZ files, which it decompresses while it ports (they need that much more free space for a while).
+- the game's files, extracted from your own Switch with your own tools: its `ExeFS/` and `RomFS/` folders (an update's extracted with the update applied), in one folder ([Game files](../README.md#game-files) in the README). The tool reads no NSP or XCI file and takes no keys.
 
 ## 1. Start the app
 
@@ -22,13 +22,12 @@ A few antivirus engines may flag `nx2android.exe` (on VirusTotal, 3 of 69 flagge
 ## 2. Setup tab (once)
 
 1. Click **Download missing tools**. The app downloads the Android NDK, the .NET SDK and Android platform-tools from Google and Microsoft (about 1 GB) into your nx2android folder. They come under their makers' licenses, which the dialog links to. If you already have them installed, set their paths instead.
-2. Set **prod.keys** to your keys file and click **Save and check**.
-3. Every line should now have a green ✓.
+2. Click **Save and check**. Every line should now have a green ✓.
 
 ## 3. Port tab
 
 1. Choose the game's folder. The card under it says which game it found and whether it can be ported: the **Games** tab lists the supported ones.
-2. Click **Port**. The first port of a game takes a while: extraction, rewriting the game's code, translating its shaders (2 to 6 minutes on a fast 20-thread PC with an SSD, much longer on a slow one or a hard disk). Later ports reuse what has not changed.
+2. Click **Port**. The first port of a game takes a while: rewriting the game's code, translating its shaders (2 to 6 minutes on a fast 20-thread PC with an SSD, much longer on a slow one or a hard disk). Later ports reuse what has not changed.
 3. The APK and the game's data folder (`<Game>-data`) appear in the game's folder. **Open output folder** shows them.
 
 ## 4. Put it on the device
@@ -37,7 +36,7 @@ With **USB debugging** on (Settings → About → tap *Build number* seven times
 
 ## When something goes wrong
 
-The log at the bottom of the Port tab says why; lines in red are errors. Ask on the project's GitHub page (Issues), with the game's title ID, your device and the red lines. Never post your keys or game files.
+The log at the bottom of the Port tab says why; lines in red are errors. Ask on the project's GitHub page (Issues), with the game's title ID, your device and the red lines. Never post your game files.
 
 **The game crashes and its log shows "AllocateAddressRegion … refused (0x1803)".** The game's own log is `log.txt` in `/sdcard/Android/data/<package>/files/` on the device. Such a game takes its memory as address regions, and your game version needs more address space than the version the game's profile was tested with (for example the base game without its update). Port it again with a larger **Extra address space** on the Port tab (the ⓘ icon explains it), for example 16 GB, then 24 GB. **Auto** already gives 8 GB to a game version the profile was not tested with. The setting uses no memory on the device and does not change the speed. On the command line it is `--alias-headroom <GB>`.
 

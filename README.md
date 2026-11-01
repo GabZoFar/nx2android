@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-Port your own Nintendo Switch games to Android, natively: the game's own arm64 code runs on the device, with the Switch's system services stood in for by a host and NVN graphics replayed on Vulkan. Pick the game's folder, click **Port**, and get an APK plus the game's data, installed on your device if you like. Bring your own game files and keys; nothing from any game is in this repository.
+Port your own Nintendo Switch games to Android, natively: the game's own arm64 code runs on the device, with the Switch's system services stood in for by a host and NVN graphics replayed on Vulkan. Pick the game's folder, click **Port**, and get an APK plus the game's data, installed on your device if you like. Bring your own game files, extracted from your own Switch; nothing from any game is in this repository.
 
 This is the Android port of [nxnative](https://github.com/seedds/nxnative), which does the same on iPhone and iPad. Supported games: [Games](#games).
 
@@ -36,8 +36,8 @@ A game that is not in this table is not supported yet. The games we look at next
 ## For players: port a game without programming
 
 1. Download `nx2android-<version>-windows-x64.zip` (Windows) or `nx2android-<version>-macos-arm64.zip` (Mac with Apple silicon) from [Releases](https://github.com/shirai91/nx2android/releases/latest), unzip it and start **nx2android** (on a Mac, see [packaging/INSTALL.md](packaging/INSTALL.md#1-start-the-app) first).
-2. **Setup** tab: click **Download missing tools** (the Android NDK, the .NET SDK and platform-tools, about 1 GB, from Google and Microsoft), then set your **prod.keys**. Every line turns green.
-3. **Port** tab: choose the folder with the game's NSP, XCI, NSZ or XCZ files (base game, update, DLC) and click **Port**.
+2. **Setup** tab: click **Download missing tools** (the Android NDK, the .NET SDK and platform-tools, about 1 GB, from Google and Microsoft). Every line turns green.
+3. **Port** tab: choose the folder of the game's extracted files ([Game files](#game-files)) and click **Port**.
 4. Tick **Install on the device when done** with the device plugged in and USB debugging on, or copy the APK and the data folder yourself.
 
 A game played by touch: tick **Touch game** on the Port tab (`--touch`). The on-screen gamepad then starts hidden and every touch but one on the menu button goes to the game; the pause menu shows the gamepad again.
@@ -46,7 +46,7 @@ To arrange the on-screen controls, open the pause menu's **Gamepad** tab and cho
 
 A game that crashes with "AllocateAddressRegion … refused (0x1803)" in its log needs more address space: port it again with a larger **Extra address space** on the Port tab (`--alias-headroom` on the command line). [packaging/INSTALL.md](packaging/INSTALL.md#when-something-goes-wrong) says more.
 
-The step-by-step guide is [packaging/INSTALL.md](packaging/INSTALL.md). You need your own game files and `prod.keys`, dumped from your own Switch; the tool never ships or downloads either. NSZ and XCZ files are decompressed during the port (into the build folder's `tmp/`, deleted once extracted).
+The step-by-step guide is [packaging/INSTALL.md](packaging/INSTALL.md). You need the game's files, extracted from your own Switch with your own tools ([Game files](#game-files)); the tool never ships or downloads them.
 
 ## Saves
 
@@ -58,11 +58,13 @@ An import replaces the save the game has; the app exports that one first on the 
 
 Running from the repository, the command line, the repository layout, building the bundle, tests and commit messages: [docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md). How it is put together: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Keys and game files
+## Game files
 
-nx2android decrypts your game files with your `prod.keys` while it ports them, as Switch emulators do. This repository and its releases contain no keys, no game files and nothing extracted from them, and the tool never downloads either. Dump both from your own Switch, and don't share them or the APKs and data packs built from them.
+nx2android ports the game's files as you extracted them from your own Switch with your own tools: it reads no NSP, XCI, NSZ or XCZ file and takes no keys. This repository and its releases contain no game files and nothing extracted from them, and the tool never downloads them. Don't share your game files or the APKs and data packs built from them.
 
-Nintendo's takedown notices so far have gone to whoever hosts a project (13 Switch emulator repositories on GitHub in February 2026), not to players. Whether decrypting your own games for your own use is allowed depends on where you live.
+The game's folder holds `ExeFS/` and `RomFS/` (an update's extracted with the update applied), and optionally the control data's `control.nacp` and icon, which give the app its name and icon. A game whose profile needs more than one version takes one such folder per version; a version is known by its code's build IDs, or by a `[v<N>]` in its folder's name. DLC goes in `aoc/`, a folder per DLC named by its title ID. One way to extract them is nxdumptool on the Switch, with the update chosen for its ExeFS and RomFS dumps.
+
+Nintendo's takedown notices so far have gone to whoever hosts a project (13 Switch emulator repositories on GitHub in February 2026), not to players. Whether extracting your own games for your own use is allowed depends on where you live.
 
 ## License
 
